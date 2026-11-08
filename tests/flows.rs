@@ -12,7 +12,7 @@ use std::time::Duration as StdDuration;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Duration;
-use grantry::client::{DocumentPolicy, FetchError, Fetched, MetadataFetcher};
+use grantry::client::{ClientError, DocumentPolicy, FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::server::{
     ApproveError, AuthorizeError, PageError, PollError, TokenError, TokenResponse,
@@ -97,7 +97,25 @@ fn fixture() -> Fixture {
     let users = Arc::new(Users::default());
     let log = Arc::new(Log::default());
     let documents = Arc::new(Documents::default());
-    let config = Config {
+    let config = config();
+    let server = Server::new(
+        config,
+        store.clone(),
+        users.clone(),
+        log.clone(),
+        documents.clone(),
+    );
+    Fixture {
+        server,
+        store,
+        users,
+        log,
+        documents,
+    }
+}
+
+fn config() -> Config {
+    Config {
         resource: RESOURCE.into(),
         token_kind: "mcp".into(),
         scopes: ScopeSpec::new(
@@ -115,20 +133,6 @@ fn fixture() -> Fixture {
             timeout: StdDuration::from_secs(1),
             ..DocumentPolicy::default()
         },
-    };
-    let server = Server::new(
-        config,
-        store.clone(),
-        users.clone(),
-        log.clone(),
-        documents.clone(),
-    );
-    Fixture {
-        server,
-        store,
-        users,
-        log,
-        documents,
     }
 }
 
@@ -259,6 +263,35 @@ async fn unknown_client_or_unregistered_redirect_is_a_page() {
         ),
         PageError::UnregisteredRedirect
     ));
+}
+
+#[tokio::test]
+async fn no_fetch_refuses_url_client_ids_but_not_registered_ones() {
+    let store = Arc::new(MemoryStore::default());
+    let server = Server::new(
+        config(),
+        store,
+        Arc::new(Users::default()),
+        Arc::new(Log::default()),
+        Arc::new(grantry::client::NoFetch),
+    );
+    match server
+        .authorize(&authorize_query(DOC_URL, CALLBACK, "read"))
+        .await
+    {
+        Err(AuthorizeError::Page(PageError::UnknownClient(ClientError::Refused(_)))) => {}
+        other => panic!("{other:?}"),
+    }
+    let doc = json!({"client_name": "Claude", "redirect_uris": [CALLBACK]});
+    let client_id = server
+        .register(doc.as_object().unwrap())
+        .await
+        .unwrap()
+        .client_id;
+    server
+        .authorize(&authorize_query(&client_id, CALLBACK, "read"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

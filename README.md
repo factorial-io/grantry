@@ -32,7 +32,7 @@ Not yet: confidential clients, axum routes for the device grant.
 
 The device methods and `create_grant` on `OAuthStore` have defaults that refuse, so a store only implements them when your app offers device login or `issue_grant`.
 
-`memory::MemoryStore` implements `OAuthStore` in memory for tests. The `client-fetch` feature adds `ReqwestFetcher`, which has no egress policy of its own.
+`memory::MemoryStore` implements `OAuthStore` in memory for tests. The `client-fetch` feature adds `ReqwestFetcher`, which has no egress policy of its own. Hosts that do not resolve metadata documents pass `grantry::client::NoFetch` instead (and set `client_id_metadata_document_supported` to `false` in the served metadata).
 
 ## Example host
 

@@ -14,7 +14,8 @@
 //!   app's own claims to the access token;
 //! - [`store::Events`]: grant created / revoked, for audit;
 //! - [`client::MetadataFetcher`]: fetches Client ID Metadata Documents under
-//!   the host's egress policy (`client-fetch` has a plain reqwest one).
+//!   the host's egress policy (`client-fetch` has a plain reqwest one;
+//!   [`client::NoFetch`] refuses all, for hosts without metadata documents).
 //!
 //! [`server::Server`] runs the flows over those ports: [`server::Server::authorize`],
 //! [`server::Server::approve`] / [`server::Server::deny`] (called from the
