@@ -146,8 +146,12 @@ pub struct RefreshToken {
 /// Timestamps may be kept at any precision the backend offers (the
 /// [`crate::memory::MemoryStore`] keeps nanoseconds, a SQL column often
 /// microseconds or milliseconds). grantry never compares a row a write
-/// returned with the same row read back later; it compares ids and orders
-/// timestamps against the clock, so sub-second truncation is harmless.
+/// returned with the same row read back later; it compares ids and checks
+/// timestamps against the clock. Any precision down to whole seconds is fine:
+/// rounding or truncation only shortens a lifetime or interval by less than
+/// one unit of that precision. A store should set `created_at` and
+/// `expires_at` of a row from the same `now`, because the server derives the
+/// device `expires_in` from `expires_at - created_at`.
 #[async_trait]
 pub trait OAuthStore: Send + Sync {
     /// Whom a grant is for.
@@ -194,7 +198,8 @@ pub trait OAuthStore: Send + Sync {
     /// Claim and delete the pending authorization in one step.
     ///
     /// *Atomic:* single use for approve and deny alike. `None` when unknown,
-    /// expired, already taken or bound to another subject.
+    /// expired, already taken or bound to another subject. An expired request
+    /// is not bound.
     async fn take_pending(
         &self,
         id: Uuid,
@@ -258,8 +263,8 @@ pub trait OAuthStore: Send + Sync {
         Err(NO_DEVICES.into())
     }
 
-    /// The live device authorization with `user_code` as `subject` may see it.
-    /// A host with tenants answers `None` outside the subject's tenant, as for
+    /// The unexpired device authorization (whatever its status) with
+    /// `user_code` as `subject` may see it. A host with tenants answers `None` outside the subject's tenant, as for
     /// an unknown code.
     async fn device_by_user_code(
         &self,

@@ -203,13 +203,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     ) -> Result<Option<Pending<S>>, BackendError> {
         let now = Utc::now();
         let mut inner = self.lock();
-        let Some(row) = inner.pending.get_mut(&id) else {
+        let Some(row) = inner.pending.get_mut(&id).filter(|p| p.expires_at > now) else {
             return Ok(None);
         };
         if row.subject.is_none() {
             row.subject = Some(subject.clone());
         }
-        if row.expires_at <= now || row.subject.as_ref() != Some(subject) {
+        if row.subject.as_ref() != Some(subject) {
             return Ok(None);
         }
         Ok(inner.pending.remove(&id))
@@ -519,6 +519,21 @@ mod tests {
         assert!(
             store
                 .claim_pending(id, &"alice".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.lock().pending[&id].subject, None);
+    }
+
+    #[tokio::test]
+    async fn take_pending_does_not_bind_an_expired_request() {
+        let store = MemoryStore::<String>::default();
+        let id = store.insert_pending(request()).await.unwrap().id;
+        store.age(Duration::seconds(601));
+        assert!(
+            store
+                .take_pending(id, &"alice".into())
                 .await
                 .unwrap()
                 .is_none()
