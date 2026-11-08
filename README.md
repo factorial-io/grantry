@@ -14,7 +14,7 @@ What it does:
 - authorization server metadata (RFC 8414) and protected resource metadata (RFC 9728);
 - optional axum routes (`axum` feature).
 
-Not yet: the device authorization grant (RFC 8628), confidential clients.
+Not yet: confidential clients.
 
 ## Ports
 

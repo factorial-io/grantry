@@ -13,8 +13,10 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::device::{Device, DeviceStatus};
 use crate::store::{
-    BackendError, Code, Grant, NewPending, OAuthStore, Pending, RefreshToken, RegisteredClient,
+    BackendError, Code, Grant, NewDevice, NewGrant, NewPending, OAuthStore, Pending, RefreshToken,
+    RegisteredClient,
 };
 
 /// How long a registered client may go without a grant before
@@ -30,6 +32,30 @@ struct Inner<S> {
     codes: HashMap<String, Code>,
     /// By hash.
     refresh: HashMap<String, RefreshToken>,
+    /// By device-code hash.
+    devices: HashMap<String, Device<S>>,
+}
+
+impl<S> Inner<S> {
+    fn device_mut(&mut self, id: Uuid) -> Option<&mut Device<S>> {
+        self.devices.values_mut().find(|d| d.id == id)
+    }
+}
+
+fn new_grant<S>(new: NewGrant<S>, now: DateTime<Utc>) -> Grant<S> {
+    Grant {
+        id: Uuid::new_v4(),
+        subject: new.subject,
+        client_id: new.client_id,
+        client_name: new.client_name,
+        redirect_uri: String::new(),
+        scope: new.scope,
+        created_at: now,
+        expires_at: now + new.lifetime,
+        last_refreshed_at: None,
+        revoked_at: None,
+        revoke_reason: None,
+    }
 }
 
 /// See the module docs.
@@ -47,6 +73,7 @@ impl<S> Default for MemoryStore<S> {
                 grants: HashMap::new(),
                 codes: HashMap::new(),
                 refresh: HashMap::new(),
+                devices: HashMap::new(),
             }),
         }
     }
@@ -76,6 +103,11 @@ impl<S> MemoryStore<S> {
         }
         for (_, at) in inner.documents.values_mut() {
             *at -= by;
+        }
+        for d in inner.devices.values_mut() {
+            d.created_at -= by;
+            d.expires_at -= by;
+            d.last_polled_at = d.last_polled_at.map(|at| at - by);
         }
     }
 }
@@ -219,6 +251,112 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         Ok(grant)
     }
 
+    async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
+        let grant = new_grant(new, Utc::now());
+        self.lock().grants.insert(grant.id, grant.clone());
+        Ok(grant)
+    }
+
+    async fn insert_device(&self, new: NewDevice) -> Result<Option<Device<S>>, BackendError> {
+        let now = Utc::now();
+        let mut inner = self.lock();
+        if inner
+            .devices
+            .values()
+            .any(|d| d.user_code == new.user_code && d.expires_at > now)
+        {
+            return Ok(None);
+        }
+        let device = Device {
+            id: Uuid::new_v4(),
+            client_id: new.client_id,
+            client_name: new.client_name,
+            scope: new.scope,
+            user_code: new.user_code,
+            status: DeviceStatus::Pending,
+            interval_seconds: new.interval_seconds,
+            last_polled_at: None,
+            subject: None,
+            created_at: now,
+            expires_at: now + new.ttl,
+        };
+        inner.devices.insert(new.device_code_hash, device.clone());
+        Ok(Some(device))
+    }
+
+    async fn find_device(&self, device_code_hash: &str) -> Result<Option<Device<S>>, BackendError> {
+        Ok(self.lock().devices.get(device_code_hash).cloned())
+    }
+
+    async fn device_by_user_code(
+        &self,
+        user_code: &str,
+        _subject: &S,
+    ) -> Result<Option<Device<S>>, BackendError> {
+        let now = Utc::now();
+        Ok(self
+            .lock()
+            .devices
+            .values()
+            .find(|d| d.user_code == user_code && d.expires_at > now)
+            .cloned())
+    }
+
+    async fn decide_device(
+        &self,
+        id: Uuid,
+        subject: &S,
+        approve: bool,
+    ) -> Result<bool, BackendError> {
+        let now = Utc::now();
+        let mut inner = self.lock();
+        let Some(d) = inner
+            .device_mut(id)
+            .filter(|d| d.status_at(now) == DeviceStatus::Pending)
+        else {
+            return Ok(false);
+        };
+        d.status = if approve {
+            DeviceStatus::Approved
+        } else {
+            DeviceStatus::Denied
+        };
+        d.subject = Some(subject.clone());
+        Ok(true)
+    }
+
+    async fn record_poll(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        interval_seconds: u32,
+    ) -> Result<(), BackendError> {
+        if let Some(d) = self.lock().device_mut(id) {
+            d.last_polled_at = Some(at);
+            d.interval_seconds = interval_seconds;
+        }
+        Ok(())
+    }
+
+    async fn redeem_device(
+        &self,
+        id: Uuid,
+        grant: NewGrant<S>,
+    ) -> Result<Option<Grant<S>>, BackendError> {
+        let now = Utc::now();
+        let mut inner = self.lock();
+        let Some(d) = inner
+            .device_mut(id)
+            .filter(|d| d.status_at(now) == DeviceStatus::Approved)
+        else {
+            return Ok(None);
+        };
+        d.status = DeviceStatus::Redeemed;
+        let grant = new_grant(grant, now);
+        inner.grants.insert(grant.id, grant.clone());
+        Ok(Some(grant))
+    }
+
     async fn find_code(&self, code_hash: &str) -> Result<Option<Code>, BackendError> {
         Ok(self.lock().codes.get(code_hash).cloned())
     }
@@ -308,9 +446,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     async fn sweep(&self) -> Result<u64, BackendError> {
         let now = Utc::now();
         let mut inner = self.lock();
-        let before =
-            inner.pending.len() + inner.codes.len() + inner.documents.len() + inner.clients.len();
+        let before = inner.pending.len()
+            + inner.codes.len()
+            + inner.documents.len()
+            + inner.clients.len()
+            + inner.devices.len();
         inner.pending.retain(|_, p| p.expires_at > now);
+        inner.devices.retain(|_, d| d.expires_at > now);
         inner.codes.retain(|_, c| c.expires_at > now);
         inner.documents.retain(|_, (_, expires)| *expires > now);
         let granted: Vec<String> = inner.grants.values().map(|g| g.client_id.clone()).collect();
@@ -318,8 +460,11 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         inner
             .clients
             .retain(|id, c| c.created_at >= cutoff || granted.contains(id));
-        let after =
-            inner.pending.len() + inner.codes.len() + inner.documents.len() + inner.clients.len();
+        let after = inner.pending.len()
+            + inner.codes.len()
+            + inner.documents.len()
+            + inner.clients.len()
+            + inner.devices.len();
         Ok(u64::try_from(before - after).unwrap_or(0))
     }
 }

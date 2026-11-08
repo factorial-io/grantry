@@ -20,14 +20,17 @@ use uuid::Uuid;
 use crate::client::{
     self, Client, ClientError, DocumentPolicy, MetadataFetcher, client_from_document, document_url,
 };
+use crate::device::{self, DEVICE_TTL_SECS, Device, POLL_INTERVAL, Poll, USER_CODE_ATTEMPTS};
 use crate::redirect::with_params;
 use crate::request::{self, Registration, RegistrationError};
 use crate::scope::ScopeSpec;
 use crate::store::{
-    BackendError, Events, Grant, NewPending, OAuthStore, Pending, Recheck, RegisteredClient,
-    Subjects, reason,
+    BackendError, Events, Grant, NewDevice, NewGrant, NewPending, OAuthStore, Pending, Recheck,
+    RegisteredClient, Subjects, reason,
 };
-use crate::token::{self, AccessClaims, Signer, VerifyError, hash_token, random_token};
+use crate::token::{
+    self, AccessClaims, Base64Url, Opaque, Signer, TokenFormat, VerifyError, hash_token,
+};
 
 /// What the flows need to know.
 #[derive(Debug, Clone)]
@@ -58,6 +61,8 @@ pub struct Server<S> {
     subjects: Arc<dyn Subjects<S>>,
     events: Arc<dyn Events<S>>,
     fetcher: Arc<dyn MetadataFetcher>,
+    tokens: Arc<dyn TokenFormat>,
+    refresh_idle: Option<Duration>,
 }
 
 impl<S> Clone for Server<S> {
@@ -68,6 +73,8 @@ impl<S> Clone for Server<S> {
             subjects: Arc::clone(&self.subjects),
             events: Arc::clone(&self.events),
             fetcher: Arc::clone(&self.fetcher),
+            tokens: Arc::clone(&self.tokens),
+            refresh_idle: self.refresh_idle,
         }
     }
 }
@@ -229,6 +236,59 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
 }
 
+/// A started device authorization (RFC 8628 §3.2), less the verification
+/// URIs, which are the host's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedDevice<S> {
+    /// For the client only; stored as its hash.
+    pub device_code: String,
+    pub device: Device<S>,
+}
+
+impl<S> StartedDevice<S> {
+    /// `expires_in`, in seconds.
+    pub fn expires_in(&self) -> i64 {
+        (self.device.expires_at - self.device.created_at).num_seconds()
+    }
+}
+
+/// A device token request that issued nothing (RFC 8628 §3.5).
+#[derive(Debug, thiserror::Error)]
+pub enum PollError {
+    #[error("authorization_pending")]
+    Pending,
+    /// Polled too fast; the interval is now `interval` seconds.
+    #[error("slow_down")]
+    SlowDown { interval: u32 },
+    #[error("access_denied")]
+    Denied,
+    #[error("expired_token")]
+    Expired,
+    /// An unknown, redeemed or foreign device code, or a refused subject.
+    #[error(transparent)]
+    Token(#[from] TokenError),
+}
+
+impl PollError {
+    /// The RFC 8628 §3.5 / RFC 6749 §5.2 error code; `None` for a backend
+    /// failure (500).
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::Pending => Some("authorization_pending"),
+            Self::SlowDown { .. } => Some("slow_down"),
+            Self::Denied => Some("access_denied"),
+            Self::Expired => Some("expired_token"),
+            Self::Token(e) => e.code(),
+        }
+    }
+}
+
+impl From<BackendError> for PollError {
+    fn from(e: BackendError) -> Self {
+        Self::Token(TokenError::Backend(e))
+    }
+}
+
 impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     pub fn new(
         config: Config,
@@ -243,7 +303,27 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             subjects,
             events,
             fetcher,
+            tokens: Arc::new(Base64Url),
+            refresh_idle: None,
         }
+    }
+
+    /// A refresh token not used within `idle` of its issue no longer
+    /// refreshes, however long its grant has left: the session ends when its
+    /// holder stops using it. Without this, only the grant's absolute
+    /// lifetime ends it.
+    #[must_use]
+    pub fn with_refresh_idle(mut self, idle: Duration) -> Self {
+        self.refresh_idle = Some(idle);
+        self
+    }
+
+    /// Mint codes and refresh tokens in the host's format instead of
+    /// [`Base64Url`].
+    #[must_use]
+    pub fn with_token_format(mut self, tokens: Arc<dyn TokenFormat>) -> Self {
+        self.tokens = tokens;
+        self
     }
 
     /// The store, for the host's own queries (connection lists, sweeps).
@@ -408,7 +488,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             .map_err(ApproveError::Backend)?
             .ok_or(ApproveError::NotFound)?;
         row.scope = scope;
-        let code = random_token();
+        let code = self.tokens.mint(Opaque::Code);
         let grant = self
             .store
             .create_grant_with_code(
@@ -491,17 +571,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         if !grant.is_active(Utc::now()) {
             return Err(TokenError::InvalidGrant);
         }
-        let access_token = self.issue(&grant, client_ip).await?;
-        let refresh_token = if self.config.scopes.is_offline(&grant.scope) {
-            let token = random_token();
-            self.store
-                .insert_refresh_token(&grant, hash_token(&token))
-                .await?;
-            Some(token)
-        } else {
-            None
-        };
-        Ok(self.response(access_token, &grant, refresh_token))
+        self.tokens_for(&grant, client_ip).await
     }
 
     /// `grant_type=refresh_token` (RFC 6749 §6), rotating (OAuth 2.1
@@ -536,12 +606,18 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                 .await?;
             return Err(TokenError::InvalidGrant);
         }
-        if !grant.is_active(Utc::now()) {
+        let now = Utc::now();
+        // Idle expiry after the reuse check, as with the grant's own: a
+        // stolen token presented late is still worth revoking the grant for.
+        let idle_over = self
+            .refresh_idle
+            .is_some_and(|idle| now >= token.issued_at + idle);
+        if idle_over || !grant.is_active(now) {
             return Err(TokenError::InvalidGrant);
         }
         // Checks before rotation, so a refused refresh leaves nothing behind.
         let access_token = self.issue(&grant, client_ip).await?;
-        let next = random_token();
+        let next = self.tokens.mint(Opaque::RefreshToken);
         if !self
             .store
             .rotate_refresh_token(&token, &grant, hash_token(&next))
@@ -553,6 +629,203 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             return Err(TokenError::InvalidGrant);
         }
         Ok(self.response(access_token, &grant, Some(next)))
+    }
+
+    /// Create a grant for `subject`, whom the host has already authenticated
+    /// (a browser login after its identity provider, say), and issue its
+    /// tokens: the authorization-code flow without the redirect. `scope` is
+    /// checked against the known scopes; empty means the default scope. A
+    /// refresh token comes with an offline scope, as in [`Self::exchange_code`].
+    pub async fn issue_grant(
+        &self,
+        subject: &S,
+        client_id: &str,
+        client_name: &str,
+        scope: &str,
+    ) -> Result<(Grant<S>, TokenResponse), TokenError> {
+        let scope = self.requested_scope(scope)?;
+        let grant = self
+            .store
+            .create_grant(NewGrant {
+                subject: subject.clone(),
+                client_id: client_id.to_owned(),
+                client_name: client_name.to_owned(),
+                scope,
+                lifetime: self.config.grant_lifetime,
+            })
+            .await?;
+        self.events.grant_created(&grant).await;
+        let response = self.tokens_for(&grant, None).await?;
+        Ok((grant, response))
+    }
+
+    // --- Device authorization grant (RFC 8628) -------------------------------
+
+    /// Start a device authorization (RFC 8628 §3.1) for `client_id`, which the
+    /// host has already accepted: a device client is public and usually one
+    /// the host ships. `scope` as in [`Self::issue_grant`].
+    pub async fn start_device(
+        &self,
+        client_id: &str,
+        client_name: &str,
+        scope: &str,
+    ) -> Result<StartedDevice<S>, TokenError> {
+        let scope = self.requested_scope(scope)?;
+        let device_code = self.tokens.mint(Opaque::DeviceCode);
+        for _ in 0..USER_CODE_ATTEMPTS {
+            let new = NewDevice {
+                client_id: client_id.to_owned(),
+                client_name: device::client_name(client_name),
+                scope: scope.clone(),
+                device_code_hash: hash_token(&device_code),
+                user_code: device::generate_user_code(),
+                interval_seconds: POLL_INTERVAL,
+                ttl: Duration::seconds(DEVICE_TTL_SECS),
+            };
+            if let Some(device) = self.store.insert_device(new).await? {
+                return Ok(StartedDevice {
+                    device_code,
+                    device,
+                });
+            }
+        }
+        Err(TokenError::Backend("no free user code".into()))
+    }
+
+    /// The device authorization a person typed `user_code` for, while it can
+    /// still be decided: for the host's verification page. `None` for a
+    /// malformed, unknown, decided or expired code.
+    pub async fn device(
+        &self,
+        user_code: &str,
+        subject: &S,
+    ) -> Result<Option<Device<S>>, BackendError> {
+        let Some(code) = device::normalize_user_code(user_code) else {
+            return Ok(None);
+        };
+        let found = self.store.device_by_user_code(&code, subject).await?;
+        Ok(found.filter(|d| device::decidable(d, Utc::now())))
+    }
+
+    /// Approve the device authorization for `user_code` as `subject`; the
+    /// client's next poll gets the tokens. `None` when there was nothing to
+    /// approve.
+    pub async fn approve_device(
+        &self,
+        user_code: &str,
+        subject: &S,
+    ) -> Result<Option<Device<S>>, BackendError> {
+        self.decide_device(user_code, subject, true).await
+    }
+
+    /// Deny the device authorization for `user_code`; the client's next poll
+    /// gets `access_denied`. `None` when there was nothing to deny.
+    pub async fn deny_device(
+        &self,
+        user_code: &str,
+        subject: &S,
+    ) -> Result<Option<Device<S>>, BackendError> {
+        self.decide_device(user_code, subject, false).await
+    }
+
+    async fn decide_device(
+        &self,
+        user_code: &str,
+        subject: &S,
+        approve: bool,
+    ) -> Result<Option<Device<S>>, BackendError> {
+        let Some(found) = self.device(user_code, subject).await? else {
+            return Ok(None);
+        };
+        let decided = self.store.decide_device(found.id, subject, approve).await?;
+        Ok(decided.then_some(found))
+    }
+
+    /// `grant_type=urn:ietf:params:oauth:grant-type:device_code` (RFC 8628
+    /// §3.4). Polling faster than the interval raises it (`slow_down`); an
+    /// approved authorization is redeemed once, through the subject check.
+    pub async fn poll_device(
+        &self,
+        device_code: &str,
+        client_id: &str,
+        client_ip: Option<&str>,
+    ) -> Result<TokenResponse, PollError> {
+        let found = self
+            .store
+            .find_device(&hash_token(device_code))
+            .await?
+            .filter(|d| d.client_id == client_id)
+            .ok_or(TokenError::InvalidGrant)?;
+        let now = Utc::now();
+        match device::judge_poll(&found, now) {
+            Poll::Pending => {
+                self.store
+                    .record_poll(found.id, now, found.interval_seconds)
+                    .await?;
+                Err(PollError::Pending)
+            }
+            Poll::SlowDown { interval } => {
+                self.store.record_poll(found.id, now, interval).await?;
+                Err(PollError::SlowDown { interval })
+            }
+            Poll::Denied => Err(PollError::Denied),
+            Poll::Expired => Err(PollError::Expired),
+            Poll::Redeemed => Err(TokenError::InvalidGrant.into()),
+            Poll::Redeem => {
+                let subject = found.subject.ok_or(TokenError::InvalidGrant)?;
+                let grant = self
+                    .store
+                    .redeem_device(
+                        found.id,
+                        NewGrant {
+                            subject,
+                            client_id: found.client_id,
+                            client_name: found.client_name,
+                            scope: found.scope,
+                            lifetime: self.config.grant_lifetime,
+                        },
+                    )
+                    .await?
+                    // Redeemed concurrently.
+                    .ok_or(TokenError::InvalidGrant)?;
+                self.events.grant_created(&grant).await;
+                Ok(self.tokens_for(&grant, client_ip).await?)
+            }
+        }
+    }
+
+    /// `scope` checked against the known scopes, canonical; empty means the
+    /// default scope.
+    fn requested_scope(&self, scope: &str) -> Result<String, TokenError> {
+        if scope.trim().is_empty() {
+            return Ok(self.config.scopes.default_scope());
+        }
+        let parsed = self
+            .config
+            .scopes
+            .parse(scope)
+            .map_err(|_| TokenError::InvalidRequest("Unknown scope."))?;
+        Ok(self.config.scopes.join(&parsed))
+    }
+
+    /// The access token for `grant`, and a refresh token with an offline
+    /// scope.
+    async fn tokens_for(
+        &self,
+        grant: &Grant<S>,
+        client_ip: Option<&str>,
+    ) -> Result<TokenResponse, TokenError> {
+        let access_token = self.issue(grant, client_ip).await?;
+        let refresh_token = if self.config.scopes.is_offline(&grant.scope) {
+            let token = self.tokens.mint(Opaque::RefreshToken);
+            self.store
+                .insert_refresh_token(grant, hash_token(&token))
+                .await?;
+            Some(token)
+        } else {
+            None
+        };
+        Ok(self.response(access_token, grant, refresh_token))
     }
 
     /// Run the subject check for `grant` and mint its access token, revoking
@@ -618,6 +891,17 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     /// (`store().find_grant`).
     pub fn verify(&self, token: &str) -> Result<Map<String, Value>, VerifyError> {
         token::verify(
+            &self.config.signer,
+            token,
+            &self.config.resource,
+            &self.config.token_kind,
+        )
+    }
+
+    /// [`Self::verify`], with the claims read as the host's type `T`
+    /// ([`token::verify_as`]).
+    pub fn verify_as<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T, VerifyError> {
+        token::verify_as(
             &self.config.signer,
             token,
             &self.config.resource,

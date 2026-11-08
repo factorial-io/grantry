@@ -21,6 +21,36 @@ pub fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
+/// Which opaque token the server is minting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Opaque {
+    /// An authorization code.
+    Code,
+    /// A refresh token.
+    RefreshToken,
+    /// A device code (RFC 8628 §3.2).
+    DeviceCode,
+}
+
+/// How the server mints its opaque tokens, for a host whose tokens have a
+/// recognisable shape (a prefix secret scanners match, say). Whatever it
+/// mints is stored and looked up only as [`hash_token`], so it must be
+/// high-entropy; the shape is the host's.
+pub trait TokenFormat: Send + Sync {
+    fn mint(&self, kind: Opaque) -> String;
+}
+
+/// The default format: [`random_token`] for every kind.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Base64Url;
+
+impl TokenFormat for Base64Url {
+    fn mint(&self, _kind: Opaque) -> String {
+        random_token()
+    }
+}
+
 /// How a code or refresh token is stored and looked up: SHA-256, hex. The
 /// tokens are high-entropy and single-purpose, so a slow hash buys nothing.
 pub fn hash_token(token: &str) -> String {
@@ -36,6 +66,16 @@ pub struct Signer {
 }
 
 impl Signer {
+    /// An HMAC signer over the raw bytes of `secret`, for a host whose secret
+    /// is configured as a plain string rather than base64.
+    pub fn hmac(algorithm: Algorithm, secret: &[u8]) -> Self {
+        Self {
+            algorithm,
+            encoding: EncodingKey::from_secret(secret),
+            decoding: DecodingKey::from_secret(secret),
+        }
+    }
+
     /// An HMAC signer over a base64-encoded secret.
     pub fn hmac_base64(
         algorithm: Algorithm,
@@ -99,6 +139,10 @@ pub enum VerifyError {
     Jwt(#[from] jsonwebtoken::errors::Error),
     #[error("token is not of kind `{0}`")]
     Kind(String),
+    /// The token verified, but its claims are not the shape asked for
+    /// ([`verify_as`]).
+    #[error("token claims do not match: {0}")]
+    Claims(#[from] serde_json::Error),
 }
 
 /// Verify `token`'s signature, expiry (no leeway), audience (`resource`,
@@ -120,6 +164,19 @@ pub fn verify(
         return Err(VerifyError::Kind(kind.to_string()));
     }
     Ok(claims)
+}
+
+/// [`verify`], then the claims as the host's own type `T`. grantry's claims
+/// sit beside the host's in one object, so `T` reads the ones it names and
+/// ignores the rest unless it denies unknown fields.
+pub fn verify_as<T: serde::de::DeserializeOwned>(
+    signer: &Signer,
+    token: &str,
+    resource: &str,
+    kind: &str,
+) -> Result<T, VerifyError> {
+    let claims = verify(signer, token, resource, kind)?;
+    Ok(serde_json::from_value(Value::Object(claims))?)
 }
 
 #[cfg(test)]
@@ -231,6 +288,61 @@ mod tests {
             verify(&signer(), &expired, RESOURCE, "mcp"),
             Err(VerifyError::Jwt(_))
         ));
+    }
+
+    /// A host's own claims (here Fons's session payload) come back typed,
+    /// beside grantry's, from a signer over a raw secret.
+    #[test]
+    fn host_claims_verify_as_the_hosts_type() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct HostClaims {
+            sub: String,
+            workspace_id: String,
+            role: String,
+            tv: i32,
+            exp: u64,
+            sid: String,
+        }
+        let raw = Signer::hmac(Algorithm::HS256, b"a-plain-string-secret");
+        let extra = json!({
+            "sub": "user-1",
+            "workspace_id": "ws-1",
+            "role": "admin",
+            "tv": 3,
+            "sid": "6d1c4a5e-0000-4000-8000-000000000001",
+        });
+        let fresh = mint(
+            &raw,
+            Utc::now(),
+            900,
+            &claims(),
+            extra.as_object().unwrap().clone(),
+        )
+        .unwrap();
+        assert_eq!(segment(&fresh, 0), json!({"typ": "JWT", "alg": "HS256"}));
+        let typed: HostClaims = verify_as(&raw, &fresh, RESOURCE, "mcp").unwrap();
+        assert_eq!(typed.sub, "user-1");
+        assert_eq!(typed.workspace_id, "ws-1");
+        assert_eq!(typed.role, "admin");
+        assert_eq!(typed.tv, 3);
+        assert_eq!(typed.sid, "6d1c4a5e-0000-4000-8000-000000000001");
+
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Missing {
+            person_id: String,
+        }
+        assert!(matches!(
+            verify_as::<Missing>(&raw, &fresh, RESOURCE, "mcp"),
+            Err(VerifyError::Claims(_))
+        ));
+        // Same bytes, base64-encoded, is the same key.
+        let b64 = Signer::hmac_base64(
+            Algorithm::HS256,
+            &base64::engine::general_purpose::STANDARD.encode(b"a-plain-string-secret"),
+        )
+        .unwrap();
+        assert!(verify(&b64, &fresh, RESOURCE, "mcp").is_ok());
     }
 
     #[test]

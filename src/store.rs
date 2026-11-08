@@ -13,6 +13,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::device::Device;
+
 /// A storage, lookup or other host failure. Never taken for a refusal: the
 /// flows pass it up untouched.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
@@ -83,6 +85,33 @@ impl<S> Grant<S> {
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
         self.revoked_at.is_none() && self.expires_at > now
     }
+}
+
+/// A grant the host creates for a subject it has already authenticated
+/// ([`crate::Server::issue_grant`]): no authorization request, no code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewGrant<S> {
+    pub subject: S,
+    pub client_id: String,
+    pub client_name: String,
+    /// The canonical scope string.
+    pub scope: String,
+    /// The absolute lifetime.
+    pub lifetime: Duration,
+}
+
+/// A device authorization to store ([`crate::Server::start_device`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDevice {
+    pub client_id: String,
+    pub client_name: String,
+    /// The canonical scope string.
+    pub scope: String,
+    pub device_code_hash: String,
+    /// `XXXX-XXXX`.
+    pub user_code: String,
+    pub interval_seconds: u32,
+    pub ttl: Duration,
 }
 
 /// An authorization code, stored by its hash.
@@ -185,6 +214,91 @@ pub trait OAuthStore: Send + Sync {
 
     async fn find_grant(&self, id: Uuid) -> Result<Option<Grant<Self::Subject>>, BackendError>;
 
+    /// Create a grant the host issued directly ([`crate::Server::issue_grant`]),
+    /// with no redirect URI. A store whose host never does that may leave the
+    /// default, which refuses.
+    async fn create_grant(
+        &self,
+        new: NewGrant<Self::Subject>,
+    ) -> Result<Grant<Self::Subject>, BackendError> {
+        let _ = new;
+        Err("this store does not create grants directly".into())
+    }
+
+    // --- Device authorization grant (RFC 8628) --------------------------------
+    //
+    // A store whose host offers no device login may leave these defaults,
+    // which refuse.
+
+    /// Store a pending device authorization; the store assigns the id and
+    /// sets `expires_at = now + ttl`. `None` when `user_code` is already taken
+    /// by a live authorization, so the server draws another.
+    async fn insert_device(
+        &self,
+        new: NewDevice,
+    ) -> Result<Option<Device<Self::Subject>>, BackendError> {
+        let _ = new;
+        Err(NO_DEVICES.into())
+    }
+
+    /// The device authorization with hash `device_code_hash`, in any state.
+    async fn find_device(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<Option<Device<Self::Subject>>, BackendError> {
+        let _ = device_code_hash;
+        Err(NO_DEVICES.into())
+    }
+
+    /// The live device authorization with `user_code` as `subject` may see it.
+    /// A host with tenants answers `None` outside the subject's tenant, as for
+    /// an unknown code.
+    async fn device_by_user_code(
+        &self,
+        user_code: &str,
+        subject: &Self::Subject,
+    ) -> Result<Option<Device<Self::Subject>>, BackendError> {
+        let _ = (user_code, subject);
+        Err(NO_DEVICES.into())
+    }
+
+    /// Approve or deny device authorization `id` as `subject`, recording who.
+    /// *Atomic:* only a pending, unexpired authorization is decided; `false`
+    /// otherwise, so it is decided once.
+    async fn decide_device(
+        &self,
+        id: Uuid,
+        subject: &Self::Subject,
+        approve: bool,
+    ) -> Result<bool, BackendError> {
+        let _ = (id, subject, approve);
+        Err(NO_DEVICES.into())
+    }
+
+    /// Record a poll of device authorization `id` at `at` and its interval
+    /// from now on.
+    async fn record_poll(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        interval_seconds: u32,
+    ) -> Result<(), BackendError> {
+        let _ = (id, at, interval_seconds);
+        Err(NO_DEVICES.into())
+    }
+
+    /// Mark device authorization `id` redeemed and create its grant.
+    /// *Atomic:* only an approved, unexpired authorization is redeemed, both
+    /// or neither; `None` otherwise, so one approval yields one grant.
+    async fn redeem_device(
+        &self,
+        id: Uuid,
+        grant: NewGrant<Self::Subject>,
+    ) -> Result<Option<Grant<Self::Subject>>, BackendError> {
+        let _ = (id, grant);
+        Err(NO_DEVICES.into())
+    }
+
     /// Revoke grant `id` for `reason`. *Atomic:* `false` when it was already
     /// revoked or does not exist, so a revocation is recorded once.
     async fn revoke_grant(&self, id: Uuid, reason: &str) -> Result<bool, BackendError>;
@@ -211,10 +325,13 @@ pub trait OAuthStore: Send + Sync {
         new_hash: String,
     ) -> Result<bool, BackendError>;
 
-    /// Delete expired pending authorizations, codes and cached documents, and
-    /// registered clients that never got a grant. Returns the rows removed.
+    /// Delete expired pending authorizations, device authorizations, codes and
+    /// cached documents, and registered clients that never got a grant.
+    /// Returns the rows removed.
     async fn sweep(&self) -> Result<u64, BackendError>;
 }
+
+const NO_DEVICES: &str = "this store does not keep device authorizations";
 
 /// What [`Subjects::recheck`] decides.
 #[derive(Debug, Clone, PartialEq)]
@@ -236,7 +353,7 @@ pub trait Subjects<S>: Send + Sync {
 /// Hooks for audit and tracing. Called after the store committed.
 #[async_trait]
 pub trait Events<S>: Send + Sync {
-    /// A grant was created by an approve.
+    /// A grant was created by an approve or [`crate::Server::issue_grant`].
     async fn grant_created(&self, _grant: &Grant<S>) {}
 
     /// A grant was revoked by a flow (reuse, a failed recheck) or by

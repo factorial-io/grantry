@@ -20,12 +20,17 @@
 //! [`server::Server::approve`] / [`server::Server::deny`] (called from the
 //! host's consent page), [`server::Server::register`],
 //! [`server::Server::exchange_code`], [`server::Server::refresh`] and
-//! [`server::Server::verify`]. The pure rules are usable on their own:
+//! [`server::Server::verify`]. The device authorization grant (RFC 8628) runs
+//! on the same server: [`server::Server::start_device`], the host's
+//! verification page with [`server::Server::approve_device`] /
+//! [`server::Server::deny_device`], and [`server::Server::poll_device`]; its
+//! rules are [`device`]. The pure rules are usable on their own:
 //! [`pkce`], [`redirect`], [`scope`], [`request`], [`token`], [`metadata`].
 //!
 //! The `axum` feature mounts the protocol routes ([`routes`]).
 
 pub mod client;
+pub mod device;
 pub mod memory;
 pub mod metadata;
 pub mod pkce;
