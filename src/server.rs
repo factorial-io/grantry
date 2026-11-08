@@ -624,4 +624,15 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             &self.config.token_kind,
         )
     }
+
+    /// [`Self::verify`], with the claims read as the host's type `T`
+    /// ([`token::verify_as`]).
+    pub fn verify_as<T: serde::de::DeserializeOwned>(&self, token: &str) -> Result<T, VerifyError> {
+        token::verify_as(
+            &self.config.signer,
+            token,
+            &self.config.resource,
+            &self.config.token_kind,
+        )
+    }
 }
