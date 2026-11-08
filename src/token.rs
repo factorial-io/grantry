@@ -29,6 +29,8 @@ pub enum Opaque {
     Code,
     /// A refresh token.
     RefreshToken,
+    /// A device code (RFC 8628 §3.2).
+    DeviceCode,
 }
 
 /// How the server mints its opaque tokens, for a host whose tokens have a

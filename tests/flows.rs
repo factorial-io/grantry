@@ -14,7 +14,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Duration;
 use grantry::client::{DocumentPolicy, FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
-use grantry::server::{ApproveError, AuthorizeError, PageError, TokenError, TokenResponse};
+use grantry::server::{
+    ApproveError, AuthorizeError, PageError, PollError, TokenError, TokenResponse,
+};
 use grantry::store::{BackendError, Events, Grant, OAuthStore};
 use grantry::{Config, Recheck, ScopeSpec, Server, Signer, Subjects};
 use jsonwebtoken::Algorithm;
@@ -740,4 +742,184 @@ async fn registration_and_sweep() {
             .unwrap()
             .is_none()
     );
+}
+
+// --- Device authorization grant (RFC 8628) -----------------------------------
+
+const CLI: &str = "host-cli";
+
+async fn start(f: &Fixture) -> (String, String) {
+    let started = f
+        .server
+        .start_device(CLI, "  host-cli on laptop ", "offline_access read")
+        .await
+        .unwrap();
+    assert_eq!(started.device.client_name, "host-cli on laptop");
+    assert_eq!(started.device.scope, "read offline_access");
+    (started.device_code, started.device.user_code)
+}
+
+async fn poll(f: &Fixture, device_code: &str) -> Result<TokenResponse, PollError> {
+    f.server
+        .poll_device(device_code, CLI, Some("10.0.0.1"))
+        .await
+}
+
+#[tokio::test]
+async fn a_device_login_is_approved_once_and_polled_politely() {
+    let f = fixture();
+    let started = f.server.start_device(CLI, "cli", "").await.unwrap();
+    assert_eq!(started.expires_in(), 600);
+    assert_eq!(started.device.interval_seconds, 5);
+    assert_eq!(started.device.scope, "read write", "the default scope");
+    let (device_code, user_code) = start(&f).await;
+    assert_ne!(device_code, started.device_code);
+
+    assert!(matches!(
+        poll(&f, &device_code).await,
+        Err(PollError::Pending)
+    ));
+    let fast = poll(&f, &device_code).await.unwrap_err();
+    assert!(matches!(fast, PollError::SlowDown { interval: 10 }));
+    assert_eq!(fast.code(), Some("slow_down"));
+
+    // The verification page: typed loosely, found; malformed, not looked up.
+    let typed = user_code.to_lowercase().replace('-', " ");
+    assert!(f.server.device(&typed, &"alice").await.unwrap().is_some());
+    assert!(f.server.device("nope", &"alice").await.unwrap().is_none());
+    let approved = f.server.approve_device(&typed, &"alice").await.unwrap();
+    assert_eq!(approved.unwrap().user_code, user_code);
+    assert!(
+        f.server
+            .approve_device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_none(),
+        "decided once"
+    );
+    assert!(
+        f.server
+            .deny_device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Another client's device code is no one's.
+    assert!(matches!(
+        f.server.poll_device(&device_code, "other", None).await,
+        Err(PollError::Token(TokenError::InvalidGrant))
+    ));
+
+    // An approved login answers at once, however fast the poll.
+    let tokens = poll(&f, &device_code).await.unwrap();
+    let claims = f.server.verify(&tokens.access_token).unwrap();
+    assert_eq!(claims["pid"], json!("alice"));
+    assert_eq!(claims["client_id"], json!(CLI));
+    let grant = grant_of(&f, &tokens).await;
+    assert_eq!(grant.subject, "alice");
+    let refresh = tokens.refresh_token.unwrap();
+    assert!(
+        f.server
+            .refresh(&form(&[("refresh_token", &refresh)]), Some(CLI), None)
+            .await
+            .is_ok()
+    );
+
+    let again = poll(&f, &device_code).await.unwrap_err();
+    assert!(matches!(again, PollError::Token(TokenError::InvalidGrant)));
+    assert_eq!(
+        again.code(),
+        Some("invalid_grant"),
+        "one approval, one grant"
+    );
+    assert!(matches!(
+        poll(&f, "unknown").await,
+        Err(PollError::Token(TokenError::InvalidGrant))
+    ));
+}
+
+#[tokio::test]
+async fn a_denied_device_login_stays_denied() {
+    let f = fixture();
+    let (device_code, user_code) = start(&f).await;
+    assert!(
+        f.server
+            .deny_device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let denied = poll(&f, &device_code).await.unwrap_err();
+    assert_eq!(denied.code(), Some("access_denied"));
+    assert!(
+        f.server
+            .approve_device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        poll(&f, &device_code).await,
+        Err(PollError::Denied)
+    ));
+}
+
+#[tokio::test]
+async fn an_undecided_device_login_expires_after_ten_minutes() {
+    let f = fixture();
+    let (device_code, user_code) = start(&f).await;
+    f.store.age(Duration::seconds(600));
+    let expired = poll(&f, &device_code).await.unwrap_err();
+    assert_eq!(expired.code(), Some("expired_token"));
+    assert!(
+        f.server
+            .device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.server
+            .approve_device(&user_code, &"alice")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Approved but never collected expires too.
+    let (device_code, user_code) = start(&f).await;
+    f.server
+        .approve_device(&user_code, &"alice")
+        .await
+        .unwrap()
+        .unwrap();
+    f.store.age(Duration::seconds(600));
+    assert!(matches!(
+        poll(&f, &device_code).await,
+        Err(PollError::Expired)
+    ));
+
+    assert_eq!(f.store.sweep().await.unwrap(), 2);
+    assert!(matches!(
+        poll(&f, &device_code).await,
+        Err(PollError::Token(TokenError::InvalidGrant))
+    ));
+}
+
+#[tokio::test]
+async fn a_device_login_rechecks_its_approver() {
+    let f = fixture();
+    let (device_code, user_code) = start(&f).await;
+    f.server
+        .approve_device(&user_code, &"bob")
+        .await
+        .unwrap()
+        .unwrap();
+    f.users.revoked.lock().unwrap().push("bob");
+    assert!(matches!(
+        poll(&f, &device_code).await,
+        Err(PollError::Token(TokenError::InvalidGrant))
+    ));
+    assert_eq!(*f.log.0.lock().unwrap(), ["user_removed@10.0.0.1"]);
 }
