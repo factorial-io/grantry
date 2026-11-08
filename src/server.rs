@@ -79,6 +79,16 @@ impl<S> Clone for Server<S> {
     }
 }
 
+/// The config and settings; the ports are left out.
+impl<S> std::fmt::Debug for Server<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("config", &self.config)
+            .field("refresh_idle", &self.refresh_idle)
+            .finish_non_exhaustive()
+    }
+}
+
 /// An error page: shown when the redirect URI is not (yet) trusted, so the
 /// error must not go back to the client.
 #[derive(Debug, thiserror::Error)]
