@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/factorial-io/grantry/compare/v0.2.0...v0.3.0) (2026-11-08)
+
+
+### Features
+
+* re-export Algorithm and NoEvents, add NoFetch metadata fetcher ([63af2b8](https://github.com/factorial-io/grantry/commit/63af2b80325e79ba490026caf32c67ede6cf1e6b))
+* re-export Algorithm and NoEvents, add NoFetch metadata fetcher ([9ce34a2](https://github.com/factorial-io/grantry/commit/9ce34a213c8c03b8593ae10a800cb0baf74e80bd)), closes [#11](https://github.com/factorial-io/grantry/issues/11)
+* sweep grants that ended more than GRANT_RETENTION_DAYS ago ([59cd50a](https://github.com/factorial-io/grantry/commit/59cd50a5c654bfc27fdb226eccb7bca9df43a005))
+* sweep grants that ended more than GRANT_RETENTION_DAYS ago ([0aa5041](https://github.com/factorial-io/grantry/commit/0aa504100a1797d293dcd5d08bf1f621f532e888)), closes [#9](https://github.com/factorial-io/grantry/issues/9)
+
+
+### Bug Fixes
+
+* do not bind expired pending requests in claim_pending; document store contract ([80ec022](https://github.com/factorial-io/grantry/commit/80ec022379156e951b165da88a72f97a839bd53f))
+* do not bind expired pending requests in claim_pending; document store contract ([f2e2d54](https://github.com/factorial-io/grantry/commit/f2e2d54163c4cc66cf0fc216a7c000b10fd7d50e)), closes [#10](https://github.com/factorial-io/grantry/issues/10)
+* review follow-ups for [#12](https://github.com/factorial-io/grantry/issues/12), [#13](https://github.com/factorial-io/grantry/issues/13) and [#14](https://github.com/factorial-io/grantry/issues/14) ([#18](https://github.com/factorial-io/grantry/issues/18)) ([19050ac](https://github.com/factorial-io/grantry/commit/19050ac94365c3019b2b568944375ea6baa79453))
+
 ## [0.2.0](https://github.com/factorial-io/grantry/compare/v0.1.0-rc.1...v0.2.0) (2026-11-08)
 
 
