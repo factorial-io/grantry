@@ -617,7 +617,7 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
     let f = fixture();
     let (grant, tokens) = f
         .server
-        .issue_grant(&"alice", "host-web", "Browser", "offline_access read")
+        .issue_grant("alice", "host-web", "Browser", "offline_access read")
         .await
         .unwrap();
     assert_eq!(grant.subject, "alice");
@@ -645,13 +645,13 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
     // No offline scope, no refresh token; an unknown scope is refused.
     let (_, online) = f
         .server
-        .issue_grant(&"alice", "host-web", "Browser", "")
+        .issue_grant("alice", "host-web", "Browser", "")
         .await
         .unwrap();
     assert!(online.refresh_token.is_none());
     assert!(matches!(
         f.server
-            .issue_grant(&"alice", "host-web", "Browser", "admin")
+            .issue_grant("alice", "host-web", "Browser", "admin")
             .await,
         Err(TokenError::InvalidRequest(_))
     ));
@@ -660,7 +660,7 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
     f.users.revoked.lock().unwrap().push("bob");
     assert!(invalid_grant(
         f.server
-            .issue_grant(&"bob", "host-web", "Browser", "read")
+            .issue_grant("bob", "host-web", "Browser", "read")
             .await
     ));
 }

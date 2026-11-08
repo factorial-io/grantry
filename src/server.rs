@@ -695,7 +695,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     /// refresh token comes with an offline scope, as in [`Self::exchange_code`].
     pub async fn issue_grant(
         &self,
-        subject: &S,
+        subject: impl Into<S>,
         client_id: &str,
         client_name: &str,
         scope: &str,
@@ -704,7 +704,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         let grant = self
             .store
             .create_grant(NewGrant {
-                subject: subject.clone(),
+                subject: subject.into(),
                 client_id: client_id.to_owned(),
                 client_name: client_name.to_owned(),
                 scope,
