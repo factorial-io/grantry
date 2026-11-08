@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.4.0](https://github.com/factorial-io/grantry/compare/v0.3.1...v0.4.0) (2026-11-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** grantry no longer enables jsonwebtoken's rust_crypto feature. A host that uses jsonwebtoken 11 itself with RSA, EC or EdDSA keys must enable a backend feature on its own dependency and install that provider at startup, before grantry's first token, e.g. jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default(). HMAC-only hosts need no change.
+* Server::issue_grant takes subject: impl Into<S> instead of &S; pass the subject by value (or clone it).
+* Server::refresh(form, client_id: Option<&str>, ip) is now Server::refresh(refresh_token: &str, client_id: &str, ip), and no longer returns TokenError::InvalidRequest.
+* Server::poll_device and Server::refresh return (Grant<S>, TokenResponse) instead of TokenResponse.
+* **deps:** jsonwebtoken types in the public API are now from jsonwebtoken 11; Algorithm is non_exhaustive there.
+
+### Features
+
+* add Config::new with defaults for the lifetimes and documents ([e95a66e](https://github.com/factorial-io/grantry/commit/e95a66ef3eda47f43073b18e915cd811344b4f66)), closes [#30](https://github.com/factorial-io/grantry/issues/30)
+* add PollError::description ([abb2e39](https://github.com/factorial-io/grantry/commit/abb2e39e858c4b8f444b6630cfd7c0b58be1fe92)), closes [#28](https://github.com/factorial-io/grantry/issues/28)
+* add Server::revoke_token for logout ([0bb76cb](https://github.com/factorial-io/grantry/commit/0bb76cb567986e5a8cac349cad5e33d9ff798f52)), closes [#32](https://github.com/factorial-io/grantry/issues/32)
+* add Server::verify_active returning the active grant ([b4631ca](https://github.com/factorial-io/grantry/commit/b4631caab368d55ea541ee4032935632109f7fc9)), closes [#24](https://github.com/factorial-io/grantry/issues/24)
+* implement Debug for Server ([9f38359](https://github.com/factorial-io/grantry/commit/9f38359791e8878edb9fd0cbb39b266f0dacfba8)), closes [#26](https://github.com/factorial-io/grantry/issues/26)
+* re-export the server's error types at the crate root ([d0faa48](https://github.com/factorial-io/grantry/commit/d0faa48a3dff2cf3f3bb027744ca6a54c3640223)), closes [#27](https://github.com/factorial-io/grantry/issues/27)
+* return the grant from poll_device and refresh ([6c7f91c](https://github.com/factorial-io/grantry/commit/6c7f91c0a81f35428961da488a6497d891fe1015)), closes [#25](https://github.com/factorial-io/grantry/issues/25)
+* take the issue_grant subject as impl Into&lt;S&gt; ([62b8c6e](https://github.com/factorial-io/grantry/commit/62b8c6e4e58a86b206af9ebccdd9ff1707cf6e38)), closes [#31](https://github.com/factorial-io/grantry/issues/31)
+* take the refresh token and client id as plain arguments in refresh ([37ba650](https://github.com/factorial-io/grantry/commit/37ba650e485d4bc101b7c20e5e840fd2ed351283)), closes [#29](https://github.com/factorial-io/grantry/issues/29)
+
+
+### Bug Fixes
+
+* **deps:** sign with an HMAC-only jsonwebtoken crypto provider ([73a1233](https://github.com/factorial-io/grantry/commit/73a1233509dc20e6f770d77d0756310c2fa9e251)), closes [#33](https://github.com/factorial-io/grantry/issues/33)
+* **deps:** update jsonwebtoken to 11 ([494c3e4](https://github.com/factorial-io/grantry/commit/494c3e43e8345e39276f6e8ee0373d5139badba6))
+
 ## [0.3.1](https://github.com/factorial-io/grantry/compare/v0.3.0...v0.3.1) (2026-11-08)
 
 
