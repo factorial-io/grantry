@@ -6,9 +6,9 @@
 ### ⚠ BREAKING CHANGES
 
 * **deps:** grantry no longer enables jsonwebtoken's rust_crypto feature. A host that uses jsonwebtoken 11 itself with RSA, EC or EdDSA keys must enable a backend feature on its own dependency and install that provider at startup, before grantry's first token, e.g. jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default(). HMAC-only hosts need no change.
-* Server::issue_grant takes subject: impl Into<S> instead of &S; pass the subject by value (or clone it).
+* Server::issue_grant takes subject: impl Into\<S\> instead of &S; pass the subject by value (or clone it).
 * Server::refresh(form, client_id: Option<&str>, ip) is now Server::refresh(refresh_token: &str, client_id: &str, ip), and no longer returns TokenError::InvalidRequest.
-* Server::poll_device and Server::refresh return (Grant<S>, TokenResponse) instead of TokenResponse.
+* Server::poll_device and Server::refresh return (Grant\<S\>, TokenResponse) instead of TokenResponse.
 * **deps:** jsonwebtoken types in the public API are now from jsonwebtoken 11; Algorithm is non_exhaustive there.
 
 ### Features
