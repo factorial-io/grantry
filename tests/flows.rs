@@ -743,7 +743,7 @@ async fn sweep_removes_ended_grants_after_retention() {
     // carol's grant expires (90 days) without being revoked.
     let (carol_client, carol) = connect(&f, "carol").await;
     let expired = grant_of(&f, &carol).await;
-    f.store.age(Duration::days(61));
+    f.store.age(Duration::days(62));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
     let rotated = f
@@ -832,13 +832,19 @@ async fn registration_and_sweep() {
 async fn sweep_keeps_a_client_with_an_authorization_in_flight() {
     let f = fixture();
     let client_id = register(&f).await;
+    let device_client = register(&f).await;
     f.store.age(Duration::days(8));
     f.server
         .authorize(&authorize_query(&client_id, CALLBACK, "read"))
         .await
         .unwrap();
+    f.server
+        .start_device(&device_client, "cli", "read")
+        .await
+        .unwrap();
     f.store.sweep().await.unwrap();
     assert!(f.store.use_client(&client_id).await.unwrap().is_some());
+    assert!(f.store.use_client(&device_client).await.unwrap().is_some());
 }
 
 // --- Device authorization grant (RFC 8628) -----------------------------------
