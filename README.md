@@ -102,7 +102,7 @@ if let Some(device) = server.device(&typed_code, &user_id).await? {
 match server.poll_device(&device_code, client_id, None).await {
     Ok((grant, tokens)) => { /* 200 with tokens; grant.subject is the user */ }
     // authorization_pending, slow_down, access_denied, expired_token, invalid_grant:
-    Err(e) => { /* 400 with {"error": e.code()} */ }
+    Err(e) => { /* 400 with {"error": e.code(), "error_description": e.description()} */ }
 }
 ```
 

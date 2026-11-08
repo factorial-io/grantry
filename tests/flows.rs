@@ -906,6 +906,10 @@ async fn a_device_login_is_approved_once_and_polled_politely() {
     let fast = poll(&f, &device_code).await.unwrap_err();
     assert!(matches!(fast, PollError::SlowDown { interval: 10 }));
     assert_eq!(fast.code(), Some("slow_down"));
+    assert_eq!(
+        fast.description(),
+        "Polling too fast; wait longer between requests."
+    );
 
     // The verification page: typed loosely, found; malformed, not looked up.
     let typed = user_code.to_lowercase().replace('-', " ");
@@ -976,6 +980,10 @@ async fn a_denied_device_login_stays_denied() {
     );
     let denied = poll(&f, &device_code).await.unwrap_err();
     assert_eq!(denied.code(), Some("access_denied"));
+    assert_eq!(
+        denied.description(),
+        "The authorization request was denied."
+    );
     assert!(
         f.server
             .approve_device(&user_code, &"alice")

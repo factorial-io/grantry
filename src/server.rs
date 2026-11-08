@@ -291,6 +291,17 @@ impl PollError {
             Self::Token(e) => e.code(),
         }
     }
+
+    /// The human-readable description.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Pending => "The authorization request is still pending.",
+            Self::SlowDown { .. } => "Polling too fast; wait longer between requests.",
+            Self::Denied => "The authorization request was denied.",
+            Self::Expired => "The device code has expired.",
+            Self::Token(e) => e.description(),
+        }
+    }
 }
 
 /// Why [`Server::verify_active`] refused an access token. Answer all but
