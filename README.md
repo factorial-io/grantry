@@ -81,6 +81,8 @@ let (grant, claims) = server.verify_active(bearer).await?;
 server.revoke_token(token, "logout", None).await?;
 ```
 
+Access tokens are HMAC-signed (`HS256`/`HS384`/`HS512`). grantry ships its own HMAC-only crypto provider for `jsonwebtoken`, so it pulls in no RSA or elliptic-curve crates and their advisories. If your process also uses `jsonwebtoken` 11 with asymmetric keys, install a full provider at startup, before grantry's first token: `jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default()`.
+
 ### Device login
 
 The device authorization grant has no axum routes yet; mount these three endpoints yourself. The verification page and its URIs are yours.

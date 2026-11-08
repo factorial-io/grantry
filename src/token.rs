@@ -58,6 +58,18 @@ pub fn hash_token(token: &str) -> String {
 }
 
 /// The key and algorithm access tokens are signed and verified with.
+///
+/// Only HMAC (`HS256`, `HS384`, `HS512`) is supported: grantry signs through
+/// its own HMAC-only `jsonwebtoken` crypto provider, so it does not pull in
+/// the RSA and elliptic-curve crates. Any other algorithm makes [`mint`] and
+/// [`verify`] fail with `InvalidAlgorithm`.
+///
+/// `jsonwebtoken` keeps one crypto provider per process. grantry installs
+/// its provider on first use unless one is already installed or resolved.
+/// A host that also uses `jsonwebtoken` 11 with RSA, EC or EdDSA keys must
+/// install a full provider at startup, before grantry's first token, e.g.
+/// `jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default()`
+/// (which also covers HMAC).
 #[derive(Clone)]
 pub struct Signer {
     pub algorithm: Algorithm,
@@ -129,6 +141,7 @@ pub fn mint(
     all.insert("client_id".into(), json!(claims.client_id));
     all.insert("grant_id".into(), json!(claims.grant_id));
     all.insert("aud".into(), json!(claims.resource));
+    hmac_provider::install();
     jsonwebtoken::encode(&Header::new(signer.algorithm), &all, &signer.encoding)
 }
 
@@ -158,6 +171,7 @@ pub fn verify(
     validation.leeway = 0;
     validation.set_audience(&[resource]);
     validation.set_required_spec_claims(&["exp", "aud"]);
+    hmac_provider::install();
     let claims =
         jsonwebtoken::decode::<Map<String, Value>>(token, &signer.decoding, &validation)?.claims;
     if claims.get("kind").and_then(Value::as_str) != Some(kind) {
@@ -177,6 +191,112 @@ pub fn verify_as<T: serde::de::DeserializeOwned>(
 ) -> Result<T, VerifyError> {
     let claims = verify(signer, token, resource, kind)?;
     Ok(serde_json::from_value(Value::Object(claims))?)
+}
+
+/// HS256/384/512 for `jsonwebtoken` on `hmac` + `sha2`, in place of its
+/// `rust_crypto` feature, which also brings `rsa` and the elliptic-curve
+/// crates (and their advisories) that grantry never uses (#33).
+mod hmac_provider {
+    use hmac::{Hmac, Mac};
+    use jsonwebtoken::crypto::{CryptoProvider, JwtSigner, JwtVerifier, KeyUtils};
+    use jsonwebtoken::errors::{ErrorKind, Result};
+    use jsonwebtoken::signature::{self, Signer, Verifier};
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey};
+    use sha2::{Sha256, Sha384, Sha512};
+
+    static PROVIDER: CryptoProvider = CryptoProvider {
+        signer_factory,
+        verifier_factory,
+        // ponytail: no JWK support; grantry never builds keys from JWKs.
+        key_utils: KeyUtils::new_unimplemented(),
+    };
+
+    /// Make grantry's provider the process default, unless the host already
+    /// installed one or `jsonwebtoken` already resolved its own.
+    pub(super) fn install() {
+        let _ = PROVIDER.install_default();
+    }
+
+    enum Key {
+        Hs256(Hmac<Sha256>),
+        Hs384(Hmac<Sha384>),
+        Hs512(Hmac<Sha512>),
+    }
+
+    impl Key {
+        fn new(algorithm: Algorithm, secret: &[u8]) -> Result<Self> {
+            let invalid = |_| ErrorKind::InvalidKeyFormat;
+            Ok(match algorithm {
+                Algorithm::HS256 => Self::Hs256(Mac::new_from_slice(secret).map_err(invalid)?),
+                Algorithm::HS384 => Self::Hs384(Mac::new_from_slice(secret).map_err(invalid)?),
+                Algorithm::HS512 => Self::Hs512(Mac::new_from_slice(secret).map_err(invalid)?),
+                _ => return Err(ErrorKind::InvalidAlgorithm.into()),
+            })
+        }
+
+        fn algorithm(&self) -> Algorithm {
+            match self {
+                Self::Hs256(_) => Algorithm::HS256,
+                Self::Hs384(_) => Algorithm::HS384,
+                Self::Hs512(_) => Algorithm::HS512,
+            }
+        }
+
+        fn mac(&self, msg: &[u8]) -> Vec<u8> {
+            fn run<M: Mac + Clone>(mac: &M, msg: &[u8]) -> Vec<u8> {
+                let mut mac = mac.clone();
+                mac.update(msg);
+                mac.finalize().into_bytes().to_vec()
+            }
+            match self {
+                Self::Hs256(m) => run(m, msg),
+                Self::Hs384(m) => run(m, msg),
+                Self::Hs512(m) => run(m, msg),
+            }
+        }
+    }
+
+    impl Signer<Vec<u8>> for Key {
+        fn try_sign(&self, msg: &[u8]) -> std::result::Result<Vec<u8>, signature::Error> {
+            Ok(self.mac(msg))
+        }
+    }
+
+    impl Verifier<Vec<u8>> for Key {
+        fn verify(&self, msg: &[u8], sig: &Vec<u8>) -> std::result::Result<(), signature::Error> {
+            fn run<M: Mac + Clone>(mac: &M, msg: &[u8], sig: &[u8]) -> bool {
+                let mut mac = mac.clone();
+                mac.update(msg);
+                mac.verify_slice(sig).is_ok() // constant time
+            }
+            let ok = match self {
+                Self::Hs256(m) => run(m, msg, sig),
+                Self::Hs384(m) => run(m, msg, sig),
+                Self::Hs512(m) => run(m, msg, sig),
+            };
+            ok.then_some(()).ok_or_else(signature::Error::new)
+        }
+    }
+
+    impl JwtSigner for Key {
+        fn algorithm(&self) -> Algorithm {
+            Key::algorithm(self)
+        }
+    }
+
+    impl JwtVerifier for Key {
+        fn algorithm(&self) -> Algorithm {
+            Key::algorithm(self)
+        }
+    }
+
+    fn signer_factory(algorithm: &Algorithm, key: &EncodingKey) -> Result<Box<dyn JwtSigner>> {
+        Ok(Box::new(Key::new(*algorithm, key.as_bytes())?))
+    }
+
+    fn verifier_factory(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtVerifier>> {
+        Ok(Box::new(Key::new(*algorithm, key.try_get_as_bytes()?)?))
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +463,31 @@ mod tests {
         )
         .unwrap();
         assert!(verify(&b64, &fresh, RESOURCE, "mcp").is_ok());
+    }
+
+    /// The exact bytes an HS256 token had before grantry brought its own
+    /// HMAC provider (#33): tokens already out there must keep verifying.
+    #[test]
+    fn hs256_token_bytes_are_stable() {
+        const KNOWN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2Zsb3dkcm9wLmV4YW1wbGUvbWNwIiwiY2xpZW50X2lkIjoiY2xpZW50LTEiLCJleHAiOjQwMDAwMDA5MDAsImdyYW50X2lkIjoiNmQxYzRhNWUtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxIiwia2luZCI6Im1jcCIsInNjb3BlIjoicmVhZCBydW4gb2ZmbGluZV9hY2Nlc3MifQ.XDdCjL5b4ASk17C4toRVn1O76zcTAEj6LYaOdTtRbXU";
+        let raw = Signer::hmac(Algorithm::HS256, b"a-plain-string-secret");
+        // Far enough ahead that the token has not expired when the test runs.
+        let now = DateTime::from_timestamp(4_000_000_000, 0).unwrap();
+        let token = mint(&raw, now, 900, &claims(), Map::new()).unwrap();
+        assert_eq!(token, KNOWN);
+        assert!(verify(&raw, KNOWN, RESOURCE, "mcp").is_ok());
+    }
+
+    /// grantry's provider signs HMAC only; anything else is an error, not a
+    /// panic.
+    #[test]
+    fn non_hmac_algorithms_fail_cleanly() {
+        for alg in [Algorithm::RS256, Algorithm::ES256, Algorithm::EdDSA] {
+            let s = Signer::hmac(alg, b"a-plain-string-secret");
+            assert!(mint(&s, Utc::now(), 60, &claims(), Map::new()).is_err());
+            let hs = mint(&signer(), Utc::now(), 60, &claims(), Map::new()).unwrap();
+            assert!(verify(&s, &hs, RESOURCE, "mcp").is_err());
+        }
     }
 
     #[test]
