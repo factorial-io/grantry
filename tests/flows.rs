@@ -727,6 +727,44 @@ async fn verify_active_refuses_tokens_of_ended_grants() {
 }
 
 #[tokio::test]
+async fn revoke_token_takes_access_or_refresh_tokens() {
+    let f = fixture();
+    let (_, by_access) = connect(&f, "alice").await;
+    let (_, by_refresh) = connect(&f, "bob").await;
+    assert!(
+        f.server
+            .revoke_token(&by_access.access_token, "logout", None)
+            .await
+            .unwrap()
+    );
+    let refresh = by_refresh.refresh_token.as_deref().unwrap();
+    assert!(
+        f.server
+            .revoke_token(refresh, "logout", None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        grant_of(&f, &by_refresh).await.revoke_reason.as_deref(),
+        Some("logout")
+    );
+    // Already revoked, or no token at all: nothing to do, and no error.
+    assert!(
+        !f.server
+            .revoke_token(&by_access.access_token, "logout", None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.server
+            .revoke_token("bogus", "logout", None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(f.log.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn sweep_removes_ended_grants_after_retention() {
     let f = fixture();
     // carol's grant expires (90 days) without being revoked.

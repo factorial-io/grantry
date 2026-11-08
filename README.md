@@ -77,6 +77,8 @@ let approved = server.approve(pending.id, &user_id, None).await?;
 let tokens = server.exchange_code(&form, form.get("client_id").map(String::as_str), None).await?;
 // Your resource server: the token verifies and its grant is still active.
 let (grant, claims) = server.verify_active(bearer).await?;
+// Logout, with the access or refresh token: revokes the grant.
+server.revoke_token(token, "logout", None).await?;
 ```
 
 ### Device login

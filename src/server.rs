@@ -945,6 +945,36 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         Ok(true)
     }
 
+    /// Revoke the grant behind `token`, an access or refresh token (RFC
+    /// 7009), for `why`: logout, say. `false` when nothing was revoked: the
+    /// token is invalid or unknown, or its grant was already revoked. RFC
+    /// 7009 §2.2 answers an invalid token with success too, so a logout may
+    /// ignore the `false`. An expired access token does not verify and
+    /// revokes nothing; log out with the refresh token where the access
+    /// token may have expired.
+    pub async fn revoke_token(
+        &self,
+        token: &str,
+        why: &str,
+        client_ip: Option<&str>,
+    ) -> Result<bool, BackendError> {
+        let id = match self.verify(token) {
+            Ok(claims) => grant_id(&claims),
+            Err(_) => self
+                .store
+                .find_refresh_token(&hash_token(token))
+                .await?
+                .map(|t| t.grant_id),
+        };
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        match self.store.find_grant(id).await? {
+            Some(grant) => self.revoke(&grant, why, client_ip).await,
+            None => Ok(false),
+        }
+    }
+
     /// Verify an access token's signature, expiry, audience and kind; its
     /// claims. Whether its grant is still live is the caller's next question:
     /// [`Self::verify_active`] answers both.
@@ -976,11 +1006,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         token: &str,
     ) -> Result<(Grant<S>, Map<String, Value>), ActiveError> {
         let claims = self.verify(token)?;
-        let Some(id) = claims
-            .get("grant_id")
-            .and_then(Value::as_str)
-            .and_then(|id| id.parse().ok())
-        else {
+        let Some(id) = grant_id(&claims) else {
             return Err(ActiveError::Inactive);
         };
         match self.store.find_grant(id).await {
@@ -989,4 +1015,9 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             Err(e) => Err(ActiveError::Backend(e)),
         }
     }
+}
+
+/// The `grant_id` claim of verified access token claims.
+fn grant_id(claims: &Map<String, Value>) -> Option<Uuid> {
+    claims.get("grant_id")?.as_str()?.parse().ok()
 }
