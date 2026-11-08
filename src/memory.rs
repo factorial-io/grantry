@@ -32,7 +32,10 @@ struct Inner<S> {
     refresh: HashMap<String, RefreshToken>,
     /// By device-code hash.
     devices: HashMap<String, Device<S>>,
-    /// Clients whose grants were all swept: they had a grant, so they stay.
+    /// Registered clients that had a grant swept: they had a grant, so they
+    /// stay. ponytail: recorded at sweep time, which suffices because only
+    /// sweep removes grants here; never shrinks, as clients are never removed
+    /// once they had a grant.
     swept_clients: HashSet<String>,
 }
 
@@ -463,12 +466,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             grants,
             codes,
             refresh,
+            clients,
             swept_clients,
             ..
         } = &mut *inner;
         grants.retain(|_, g| {
             let keep = g.expires_at.min(g.revoked_at.unwrap_or(g.expires_at)) >= ended;
-            if !keep {
+            if !keep && clients.contains_key(&g.client_id) {
                 swept_clients.insert(g.client_id.clone());
             }
             keep

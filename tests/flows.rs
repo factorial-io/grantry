@@ -828,6 +828,19 @@ async fn registration_and_sweep() {
     );
 }
 
+#[tokio::test]
+async fn sweep_keeps_a_client_with_an_authorization_in_flight() {
+    let f = fixture();
+    let client_id = register(&f).await;
+    f.store.age(Duration::days(8));
+    f.server
+        .authorize(&authorize_query(&client_id, CALLBACK, "read"))
+        .await
+        .unwrap();
+    f.store.sweep().await.unwrap();
+    assert!(f.store.use_client(&client_id).await.unwrap().is_some());
+}
+
 // --- Device authorization grant (RFC 8628) -----------------------------------
 
 const CLI: &str = "host-cli";

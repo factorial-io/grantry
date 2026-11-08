@@ -148,8 +148,8 @@ pub struct RefreshToken {
 /// microseconds or milliseconds). grantry never compares a row a write
 /// returned with the same row read back later; it compares ids and checks
 /// timestamps against the clock. Any precision down to whole seconds is fine:
-/// rounding or truncation only shortens a lifetime or interval by less than
-/// one unit of that precision. A store should set `created_at` and
+/// rounding or truncation only shifts a lifetime or interval by less than one
+/// unit of that precision. A store should set `created_at` and
 /// `expires_at` of a row from the same `now`, because the server derives the
 /// device `expires_in` from `expires_at - created_at`.
 #[async_trait]
@@ -165,7 +165,7 @@ pub trait OAuthStore: Send + Sync {
         redirect_uris: &[String],
     ) -> Result<RegisteredClient, BackendError>;
 
-    /// The registered client `id`, stamping its last use.
+    /// The registered client `id`.
     async fn use_client(&self, id: &str) -> Result<Option<RegisteredClient>, BackendError>;
 
     /// The cached metadata document for `url`, if it has not expired.
@@ -264,8 +264,8 @@ pub trait OAuthStore: Send + Sync {
     }
 
     /// The unexpired device authorization (whatever its status) with
-    /// `user_code` as `subject` may see it. A host with tenants answers `None` outside the subject's tenant, as for
-    /// an unknown code.
+    /// `user_code` as `subject` may see it. A host with tenants answers `None`
+    /// outside the subject's tenant, as for an unknown code.
     async fn device_by_user_code(
         &self,
         user_code: &str,
@@ -344,7 +344,11 @@ pub trait OAuthStore: Send + Sync {
     /// tokens (rotated ones included); and registered clients older than
     /// [`UNUSED_CLIENT_DAYS`] that never got a grant and have no live pending
     /// or device authorization. A client that ever had a grant stays, also
-    /// after its grants are swept.
+    /// after its grants are swept. [`RegisteredClient`] carries no field for
+    /// that, so a store keeps its own flag on the client row, best set when a
+    /// grant is created (so it also holds when a host deletes grants itself);
+    /// checking only for existing grants would delete a returning client once
+    /// its last grant is swept.
     ///
     /// Returns the rows removed, counting every row once: a grant's codes and
     /// refresh tokens count as well. An SQL backend must delete them
@@ -363,8 +367,8 @@ pub trait OAuthStore: Send + Sync {
 /// gets the same `invalid_grant`, but no event fires.
 pub const GRANT_RETENTION_DAYS: i64 = 30;
 
-/// How long a registered client may go without a grant before
-/// [`OAuthStore::sweep`] removes it.
+/// How long after registration [`OAuthStore::sweep`] removes a client that
+/// never got a grant and has no live pending or device authorization.
 pub const UNUSED_CLIENT_DAYS: i64 = 7;
 
 const NO_DEVICES: &str = "this store does not keep device authorizations";
