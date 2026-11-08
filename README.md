@@ -54,17 +54,14 @@ impl Subjects<String> for Users {
 }
 
 let server = Server::new(
-    Config {
-        resource: "https://app.example/mcp".into(),
-        token_kind: "mcp".into(),
-        scopes: ScopeSpec::new(&["read", "write", "offline_access"], &["read"], "offline_access"),
-        signer: Signer::hmac_base64(jsonwebtoken::Algorithm::HS256, SECRET_BASE64)?,
-        access_token_secs: 900,
-        code_ttl: chrono::Duration::seconds(60),
-        pending_ttl: chrono::Duration::minutes(10),
-        grant_lifetime: chrono::Duration::days(90),
-        documents: Default::default(),
-    },
+    // 15-minute access tokens, 90-day grants; override any field with
+    // Config { grant_lifetime: ..., ..Config::new(...) }.
+    Config::new(
+        "https://app.example/mcp",
+        "mcp",
+        ScopeSpec::new(&["read", "write", "offline_access"], &["read"], "offline_access"),
+        Signer::hmac_base64(grantry::Algorithm::HS256, SECRET_BASE64)?,
+    ),
     Arc::new(MemoryStore::default()),
     Arc::new(Users),
     Arc::new(NoEvents),

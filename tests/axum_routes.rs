@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Duration;
-use grantry::client::{DocumentPolicy, FetchError, Fetched, MetadataFetcher};
+use grantry::client::{FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::metadata::AuthorizationServerMetadata;
 use grantry::routes::{Routes, router};
@@ -56,16 +56,15 @@ fn server() -> Server<String> {
     let scopes = ScopeSpec::new(&["read", "offline_access"], &["read"], "offline_access");
     Server::new(
         Config {
-            resource: format!("{ISSUER}/mcp"),
-            token_kind: "mcp".into(),
-            scopes,
-            signer: Signer::hmac_base64(Algorithm::HS256, "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
-                .unwrap(),
             access_token_secs: 300,
-            code_ttl: Duration::seconds(60),
-            pending_ttl: Duration::seconds(600),
             grant_lifetime: Duration::days(30),
-            documents: DocumentPolicy::default(),
+            ..Config::new(
+                format!("{ISSUER}/mcp"),
+                "mcp",
+                scopes,
+                Signer::hmac_base64(Algorithm::HS256, "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
+                    .unwrap(),
+            )
         },
         Arc::new(MemoryStore::default()),
         Arc::new(Everyone),

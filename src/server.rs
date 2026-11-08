@@ -53,6 +53,32 @@ pub struct Config {
     pub documents: DocumentPolicy,
 }
 
+impl Config {
+    /// A config with defaults for the rest: 15-minute access tokens, 60-second
+    /// codes, 10-minute pending authorizations, 90-day grants and the default
+    /// [`DocumentPolicy`]. Hosts without the authorization-code flow never
+    /// use the code, pending and document settings. Override with
+    /// `Config { grant_lifetime: ..., ..Config::new(...) }`.
+    pub fn new(
+        resource: impl Into<String>,
+        token_kind: impl Into<String>,
+        scopes: ScopeSpec,
+        signer: Signer,
+    ) -> Self {
+        Self {
+            resource: resource.into(),
+            token_kind: token_kind.into(),
+            scopes,
+            signer,
+            access_token_secs: 900,
+            code_ttl: Duration::seconds(60),
+            pending_ttl: Duration::minutes(10),
+            grant_lifetime: Duration::days(90),
+            documents: DocumentPolicy::default(),
+        }
+    }
+}
+
 /// The authorization server: the flows over a store, the subject check, the
 /// event hook and the metadata fetcher. Cheap to clone.
 pub struct Server<S> {
