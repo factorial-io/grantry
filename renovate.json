@@ -1,0 +1,108 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":automergeMinor"
+  ],
+  "timezone": "Europe/Berlin",
+  "schedule": [
+    "after 10pm",
+    "before 6am"
+  ],
+  "platformAutomerge": true,
+  "rebaseWhen": "conflicted",
+  "labels": [
+    "dependencies"
+  ],
+  "assignees": [
+    "stmh"
+  ],
+  "packageRules": [
+    {
+      "description": "Group Rust patch dependencies",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "groupName": "rust dependencies (patch)",
+      "automerge": true
+    },
+    {
+      "description": "Individual PRs for Rust minor updates",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Never automerge jsonwebtoken: it decides the token bytes every host's existing connections depend on.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "jsonwebtoken"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Group GitHub Actions patch updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "groupName": "github actions (patch)",
+      "automerge": true
+    },
+    {
+      "description": "Individual PRs for GitHub Actions minor updates",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Skip major updates entirely",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Tag patch updates so CI can skip expensive review steps",
+      "matchUpdateTypes": [
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "addLabels": [
+        "patch"
+      ]
+    },
+    {
+      "description": "Tag minor updates for visibility",
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "addLabels": [
+        "minor"
+      ]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security"
+    ],
+    "automerge": true
+  }
+}
