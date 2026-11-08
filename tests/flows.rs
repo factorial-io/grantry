@@ -705,6 +705,49 @@ async fn revoke_is_recorded_once() {
 }
 
 #[tokio::test]
+async fn sweep_removes_ended_grants_after_retention() {
+    let f = fixture();
+    let (client_id, tokens) = connect(&f, "alice").await;
+    let first = tokens.refresh_token.unwrap();
+    let rotated = f
+        .server
+        .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
+        .await
+        .unwrap();
+    let ended = grant_of(&f, &rotated).await;
+    assert!(f.server.revoke(&ended, "user", None).await.unwrap());
+    let (_, kept) = connect(&f, "bob").await;
+    let kept = grant_of(&f, &kept).await;
+
+    // Within the retention the revoked grant stays, its rotated token too:
+    // only the used codes and cached documents go.
+    f.store
+        .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS - 1));
+    f.store.sweep().await.unwrap();
+    assert!(f.store.find_grant(ended.id).await.unwrap().is_some());
+    assert!(
+        f.store
+            .find_refresh_token(&grantry::token::hash_token(&first))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Past it: the grant, both its refresh tokens and its client, which has
+    // no grant left: four rows.
+    f.store.age(Duration::days(2));
+    assert_eq!(f.store.sweep().await.unwrap(), 4);
+    assert!(f.store.find_grant(ended.id).await.unwrap().is_none());
+    assert!(f.store.use_client(&client_id).await.unwrap().is_none());
+    assert!(invalid_grant(
+        f.server
+            .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
+            .await
+    ));
+    assert!(f.store.find_grant(kept.id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn registration_and_sweep() {
     let f = fixture();
     let refused = f

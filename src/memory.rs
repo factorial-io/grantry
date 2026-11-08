@@ -15,11 +15,11 @@ use uuid::Uuid;
 
 use crate::device::{Device, DeviceStatus};
 use crate::store::{
-    BackendError, Code, Grant, NewDevice, NewGrant, NewPending, OAuthStore, Pending, RefreshToken,
-    RegisteredClient,
+    BackendError, Code, GRANT_RETENTION_DAYS, Grant, NewDevice, NewGrant, NewPending, OAuthStore,
+    Pending, RefreshToken, RegisteredClient,
 };
 
-/// How long a registered client may go without a grant before
+/// How long a registered client may go without a grant (none yet, or all swept) before
 /// [`OAuthStore::sweep`] removes it.
 pub const UNUSED_CLIENT_DAYS: i64 = 7;
 
@@ -97,6 +97,7 @@ impl<S> MemoryStore<S> {
         for g in inner.grants.values_mut() {
             g.expires_at -= by;
             g.created_at -= by;
+            g.revoked_at = g.revoked_at.map(|at| at - by);
         }
         for c in inner.clients.values_mut() {
             c.created_at -= by;
@@ -446,25 +447,36 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     async fn sweep(&self) -> Result<u64, BackendError> {
         let now = Utc::now();
         let mut inner = self.lock();
-        let before = inner.pending.len()
-            + inner.codes.len()
-            + inner.documents.len()
-            + inner.clients.len()
-            + inner.devices.len();
+        let count = |i: &Inner<S>| {
+            i.pending.len()
+                + i.codes.len()
+                + i.documents.len()
+                + i.clients.len()
+                + i.devices.len()
+                + i.grants.len()
+                + i.refresh.len()
+        };
+        let before = count(&inner);
+        let ended = now - Duration::days(GRANT_RETENTION_DAYS);
+        inner
+            .grants
+            .retain(|_, g| g.expires_at.min(g.revoked_at.unwrap_or(g.expires_at)) >= ended);
+        let Inner {
+            grants,
+            codes,
+            refresh,
+            ..
+        } = &mut *inner;
+        codes.retain(|_, c| c.expires_at > now && grants.contains_key(&c.grant_id));
+        refresh.retain(|_, t| grants.contains_key(&t.grant_id));
         inner.pending.retain(|_, p| p.expires_at > now);
         inner.devices.retain(|_, d| d.expires_at > now);
-        inner.codes.retain(|_, c| c.expires_at > now);
         inner.documents.retain(|_, (_, expires)| *expires > now);
         let granted: Vec<String> = inner.grants.values().map(|g| g.client_id.clone()).collect();
         let cutoff = now - Duration::days(UNUSED_CLIENT_DAYS);
         inner
             .clients
             .retain(|id, c| c.created_at >= cutoff || granted.contains(id));
-        let after = inner.pending.len()
-            + inner.codes.len()
-            + inner.documents.len()
-            + inner.clients.len()
-            + inner.devices.len();
-        Ok(u64::try_from(before - after).unwrap_or(0))
+        Ok(u64::try_from(before - count(&inner)).unwrap_or(0))
     }
 }
