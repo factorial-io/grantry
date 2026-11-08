@@ -50,6 +50,6 @@ pub use client::{Client, ClientError, MetadataFetcher, NoFetch};
 /// depend on `jsonwebtoken` directly.
 pub use jsonwebtoken::Algorithm;
 pub use scope::ScopeSpec;
-pub use server::{Config, Server};
+pub use server::{ActiveError, Config, PollError, Server, TokenError};
 pub use store::{BackendError, Events, Grant, NoEvents, OAuthStore, Recheck, Subjects};
 pub use token::Signer;
