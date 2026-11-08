@@ -148,12 +148,11 @@ where
                 .exchange_code(&form, client_id.as_deref(), None)
                 .await
         }
-        Some("refresh_token") => {
-            state
-                .server
-                .refresh(&form, client_id.as_deref(), None)
-                .await
-        }
+        Some("refresh_token") => state
+            .server
+            .refresh(&form, client_id.as_deref(), None)
+            .await
+            .map(|(_, tokens)| tokens),
         Some(_) => {
             return match &state.routes.other_grant {
                 Some(hook) => hook(form, headers).await,

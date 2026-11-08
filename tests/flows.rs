@@ -215,7 +215,7 @@ async fn connect(f: &Fixture, user: User) -> (String, TokenResponse) {
     (client_id, tokens)
 }
 
-fn invalid_grant(r: Result<TokenResponse, TokenError>) -> bool {
+fn invalid_grant<T>(r: Result<T, TokenError>) -> bool {
     matches!(r, Err(TokenError::InvalidGrant))
 }
 
@@ -556,10 +556,11 @@ async fn refresh_rotates_and_reuse_revokes() {
         Err(TokenError::InvalidRequest(_))
     ));
     assert!(invalid_grant(refresh(&first, "other-client").await));
-    let second = refresh(&first, &client_id).await.unwrap();
+    let (grant, second) = refresh(&first, &client_id).await.unwrap();
     let next = second.refresh_token.clone().unwrap();
     assert_ne!(next, first);
     assert_eq!(second.scope, "read offline_access");
+    assert_eq!(grant.subject, "alice");
     assert!(grant_of(&f, &second).await.last_refreshed_at.is_some());
 
     // The rotated token again: the grant is revoked, the new one dies too.
@@ -594,7 +595,7 @@ async fn a_host_token_format_shapes_refresh_tokens() {
     let first = tokens.refresh_token.unwrap();
     assert!(first.starts_with("host_rt_"), "{first}");
 
-    let second = f
+    let (_, second) = f
         .server
         .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
         .await
@@ -613,7 +614,7 @@ async fn an_idle_refresh_token_expires_without_revoking_the_grant() {
     f.server = f.server.with_refresh_idle(Duration::hours(1));
     let (client_id, tokens) = connect(&f, "alice").await;
     let fresh = tokens.refresh_token.clone().unwrap();
-    let refreshed = f
+    let (_, refreshed) = f
         .server
         .refresh(&form(&[("refresh_token", &fresh)]), Some(&client_id), None)
         .await
@@ -663,6 +664,7 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
         )
         .await
         .unwrap()
+        .1
         .refresh_token
         .unwrap();
     assert!(f.server.revoke(&grant, "logout", None).await.unwrap());
@@ -692,7 +694,6 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
         f.server
             .issue_grant(&"bob", "host-web", "Browser", "read")
             .await
-            .map(|(_, t)| t)
     ));
 }
 
@@ -766,7 +767,7 @@ async fn sweep_removes_ended_grants_after_retention() {
     f.store.age(Duration::days(62));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
-    let rotated = f
+    let (_, rotated) = f
         .server
         .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
         .await
@@ -882,7 +883,7 @@ async fn start(f: &Fixture) -> (String, String) {
     (started.device_code, started.device.user_code)
 }
 
-async fn poll(f: &Fixture, device_code: &str) -> Result<TokenResponse, PollError> {
+async fn poll(f: &Fixture, device_code: &str) -> Result<(Grant<User>, TokenResponse), PollError> {
     f.server
         .poll_device(device_code, CLI, Some("10.0.0.1"))
         .await
@@ -935,12 +936,12 @@ async fn a_device_login_is_approved_once_and_polled_politely() {
     ));
 
     // An approved login answers at once, however fast the poll.
-    let tokens = poll(&f, &device_code).await.unwrap();
+    let (grant, tokens) = poll(&f, &device_code).await.unwrap();
+    assert_eq!(grant.subject, "alice");
     let claims = f.server.verify(&tokens.access_token).unwrap();
     assert_eq!(claims["pid"], json!("alice"));
     assert_eq!(claims["client_id"], json!(CLI));
-    let grant = grant_of(&f, &tokens).await;
-    assert_eq!(grant.subject, "alice");
+    assert_eq!(claims["grant_id"], json!(grant.id.to_string()));
     let refresh = tokens.refresh_token.unwrap();
     assert!(
         f.server

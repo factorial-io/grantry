@@ -589,13 +589,14 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
 
     /// `grant_type=refresh_token` (RFC 6749 §6), rotating (OAuth 2.1
     /// §4.3.1): every refresh issues a new refresh token; presenting a rotated
-    /// one revokes the grant.
+    /// one revokes the grant. The grant, as in [`Self::issue_grant`], and the
+    /// tokens.
     pub async fn refresh(
         &self,
         form: &HashMap<String, String>,
         client_id: Option<&str>,
         client_ip: Option<&str>,
-    ) -> Result<TokenResponse, TokenError> {
+    ) -> Result<(Grant<S>, TokenResponse), TokenError> {
         let (Some(presented), Some(client_id)) = (form.get("refresh_token"), client_id) else {
             return Err(TokenError::InvalidRequest(
                 "refresh_token and client_id are required.",
@@ -641,7 +642,8 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                 .await?;
             return Err(TokenError::InvalidGrant);
         }
-        Ok(self.response(access_token, &grant, Some(next)))
+        let response = self.response(access_token, &grant, Some(next));
+        Ok((grant, response))
     }
 
     /// Create a grant for `subject`, whom the host has already authenticated
@@ -757,12 +759,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     /// `grant_type=urn:ietf:params:oauth:grant-type:device_code` (RFC 8628
     /// §3.4). Polling faster than the interval raises it (`slow_down`); an
     /// approved authorization is redeemed once, through the subject check.
+    /// The new grant, as in [`Self::issue_grant`], and its tokens.
     pub async fn poll_device(
         &self,
         device_code: &str,
         client_id: &str,
         client_ip: Option<&str>,
-    ) -> Result<TokenResponse, PollError> {
+    ) -> Result<(Grant<S>, TokenResponse), PollError> {
         let found = self
             .store
             .find_device(&hash_token(device_code))
@@ -802,7 +805,8 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                     // Redeemed concurrently.
                     .ok_or(TokenError::InvalidGrant)?;
                 self.events.grant_created(&grant).await;
-                Ok(self.tokens_for(&grant, client_ip).await?)
+                let response = self.tokens_for(&grant, client_ip).await?;
+                Ok((grant, response))
             }
         }
     }
