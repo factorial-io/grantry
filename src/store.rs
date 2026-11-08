@@ -326,10 +326,26 @@ pub trait OAuthStore: Send + Sync {
     ) -> Result<bool, BackendError>;
 
     /// Delete expired pending authorizations, device authorizations, codes and
-    /// cached documents, and registered clients that never got a grant.
-    /// Returns the rows removed.
+    /// cached documents; grants that expired or were revoked more than
+    /// [`GRANT_RETENTION_DAYS`] ago, together with their codes and refresh
+    /// tokens (rotated ones included); and registered clients older than
+    /// [`crate::memory::UNUSED_CLIENT_DAYS`] with no grant left.
+    ///
+    /// Returns the rows removed, counting every row once: a grant's codes and
+    /// refresh tokens count as well, whether the backend deletes them itself
+    /// or by cascade.
     async fn sweep(&self) -> Result<u64, BackendError>;
 }
+
+/// How long [`OAuthStore::sweep`] keeps a grant after it expired or was
+/// revoked, and with it its rotated refresh tokens.
+///
+/// While the grant is kept, presenting one of its old refresh tokens or codes
+/// still reaches the reuse check and is reported to [`Events::grant_revoked`]
+/// (once, for a grant that only expired); the host can also still list the
+/// grant as ended. Once it is swept such a token is merely unknown: the client
+/// gets the same `invalid_grant`, but no event fires.
+pub const GRANT_RETENTION_DAYS: i64 = 30;
 
 const NO_DEVICES: &str = "this store does not keep device authorizations";
 
