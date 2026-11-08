@@ -146,8 +146,14 @@ pub struct RefreshToken {
 /// Timestamps may be kept at any precision the backend offers (the
 /// [`crate::memory::MemoryStore`] keeps nanoseconds, a SQL column often
 /// microseconds or milliseconds). grantry never compares a row a write
-/// returned with the same row read back later; it compares ids and orders
-/// timestamps against the clock, so sub-second truncation is harmless.
+/// returned with the same row read back later; it compares ids and checks
+/// timestamps against the clock. Any precision down to whole seconds is fine
+/// if the backend truncates: that only shortens a lifetime or interval by less
+/// than one unit. Do not round up: a `last_polled_at` rounded up by half a
+/// second makes a device client that polls exactly on its interval look too
+/// fast and get `slow_down`. A store should set `created_at` and
+/// `expires_at` of a row from the same `now`, because the server derives the
+/// device `expires_in` from `expires_at - created_at`.
 #[async_trait]
 pub trait OAuthStore: Send + Sync {
     /// Whom a grant is for.
@@ -161,7 +167,7 @@ pub trait OAuthStore: Send + Sync {
         redirect_uris: &[String],
     ) -> Result<RegisteredClient, BackendError>;
 
-    /// The registered client `id`, stamping its last use.
+    /// The registered client `id`.
     async fn use_client(&self, id: &str) -> Result<Option<RegisteredClient>, BackendError>;
 
     /// The cached metadata document for `url`, if it has not expired.
@@ -194,7 +200,8 @@ pub trait OAuthStore: Send + Sync {
     /// Claim and delete the pending authorization in one step.
     ///
     /// *Atomic:* single use for approve and deny alike. `None` when unknown,
-    /// expired, already taken or bound to another subject.
+    /// expired, already taken or bound to another subject. An expired request
+    /// is not bound.
     async fn take_pending(
         &self,
         id: Uuid,
@@ -258,9 +265,9 @@ pub trait OAuthStore: Send + Sync {
         Err(NO_DEVICES.into())
     }
 
-    /// The live device authorization with `user_code` as `subject` may see it.
-    /// A host with tenants answers `None` outside the subject's tenant, as for
-    /// an unknown code.
+    /// The unexpired device authorization (whatever its status) with
+    /// `user_code` as `subject` may see it. A host with tenants answers `None`
+    /// outside the subject's tenant, as for an unknown code.
     async fn device_by_user_code(
         &self,
         user_code: &str,
@@ -337,23 +344,36 @@ pub trait OAuthStore: Send + Sync {
     /// cached documents; grants that expired or were revoked more than
     /// [`GRANT_RETENTION_DAYS`] ago, together with their codes and refresh
     /// tokens (rotated ones included); and registered clients older than
-    /// [`crate::memory::UNUSED_CLIENT_DAYS`] with no grant left.
+    /// [`UNUSED_CLIENT_DAYS`] that never got a grant and have no unexpired
+    /// pending or device authorization. A client that ever had a grant stays, also
+    /// after its grants are swept. [`RegisteredClient`] carries no field for
+    /// that, so a store keeps its own flag on the client row, best set when a
+    /// grant is created (so it also holds when a host deletes grants itself);
+    /// checking only for existing grants would delete a returning client once
+    /// its last grant is swept. A store adding the flag to existing data must
+    /// backfill it for every client that has a grant, or those clients go once
+    /// their grants pass the retention.
     ///
     /// Returns the rows removed, counting every row once: a grant's codes and
-    /// refresh tokens count as well, whether the backend deletes them itself
-    /// or by cascade.
+    /// refresh tokens count as well. An SQL backend must delete them
+    /// explicitly, or count them in the same transaction, since the row count
+    /// of an `ON DELETE CASCADE` delete does not include child rows.
     async fn sweep(&self) -> Result<u64, BackendError>;
 }
 
 /// How long [`OAuthStore::sweep`] keeps a grant after it expired or was
 /// revoked, and with it its rotated refresh tokens.
 ///
-/// While the grant is kept, presenting one of its old refresh tokens or codes
-/// still reaches the reuse check and is reported to [`Events::grant_revoked`]
+/// While the grant is kept, presenting one of its old refresh tokens still
+/// reaches the reuse check and is reported to [`Events::grant_revoked`]
 /// (once, for a grant that only expired); the host can also still list the
 /// grant as ended. Once it is swept such a token is merely unknown: the client
 /// gets the same `invalid_grant`, but no event fires.
 pub const GRANT_RETENTION_DAYS: i64 = 30;
+
+/// How long after registration [`OAuthStore::sweep`] removes a client that
+/// never got a grant and has no unexpired pending or device authorization.
+pub const UNUSED_CLIENT_DAYS: i64 = 7;
 
 const NO_DEVICES: &str = "this store does not keep device authorizations";
 

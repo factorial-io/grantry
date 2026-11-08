@@ -12,7 +12,7 @@ use std::time::Duration as StdDuration;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Duration;
-use grantry::client::{DocumentPolicy, FetchError, Fetched, MetadataFetcher};
+use grantry::client::{ClientError, DocumentPolicy, FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::server::{
     ApproveError, AuthorizeError, PageError, PollError, TokenError, TokenResponse,
@@ -97,7 +97,25 @@ fn fixture() -> Fixture {
     let users = Arc::new(Users::default());
     let log = Arc::new(Log::default());
     let documents = Arc::new(Documents::default());
-    let config = Config {
+    let config = config();
+    let server = Server::new(
+        config,
+        store.clone(),
+        users.clone(),
+        log.clone(),
+        documents.clone(),
+    );
+    Fixture {
+        server,
+        store,
+        users,
+        log,
+        documents,
+    }
+}
+
+fn config() -> Config {
+    Config {
         resource: RESOURCE.into(),
         token_kind: "mcp".into(),
         scopes: ScopeSpec::new(
@@ -115,20 +133,6 @@ fn fixture() -> Fixture {
             timeout: StdDuration::from_secs(1),
             ..DocumentPolicy::default()
         },
-    };
-    let server = Server::new(
-        config,
-        store.clone(),
-        users.clone(),
-        log.clone(),
-        documents.clone(),
-    );
-    Fixture {
-        server,
-        store,
-        users,
-        log,
-        documents,
     }
 }
 
@@ -259,6 +263,35 @@ async fn unknown_client_or_unregistered_redirect_is_a_page() {
         ),
         PageError::UnregisteredRedirect
     ));
+}
+
+#[tokio::test]
+async fn no_fetch_refuses_url_client_ids_but_not_registered_ones() {
+    let store = Arc::new(MemoryStore::default());
+    let server = Server::new(
+        config(),
+        store,
+        Arc::new(Users::default()),
+        Arc::new(Log::default()),
+        Arc::new(grantry::client::NoFetch),
+    );
+    match server
+        .authorize(&authorize_query(DOC_URL, CALLBACK, "read"))
+        .await
+    {
+        Err(AuthorizeError::Page(PageError::UnknownClient(ClientError::Refused(_)))) => {}
+        other => panic!("{other:?}"),
+    }
+    let doc = json!({"client_name": "Claude", "redirect_uris": [CALLBACK]});
+    let client_id = server
+        .register(doc.as_object().unwrap())
+        .await
+        .unwrap()
+        .client_id;
+    server
+        .authorize(&authorize_query(&client_id, CALLBACK, "read"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -707,6 +740,10 @@ async fn revoke_is_recorded_once() {
 #[tokio::test]
 async fn sweep_removes_ended_grants_after_retention() {
     let f = fixture();
+    // carol's grant expires (90 days) without being revoked.
+    let (carol_client, carol) = connect(&f, "carol").await;
+    let expired = grant_of(&f, &carol).await;
+    f.store.age(Duration::days(62));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
     let rotated = f
@@ -714,17 +751,18 @@ async fn sweep_removes_ended_grants_after_retention() {
         .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
         .await
         .unwrap();
-    let ended = grant_of(&f, &rotated).await;
-    assert!(f.server.revoke(&ended, "user", None).await.unwrap());
+    let revoked = grant_of(&f, &rotated).await;
+    assert!(f.server.revoke(&revoked, "user", None).await.unwrap());
     let (_, kept) = connect(&f, "bob").await;
     let kept = grant_of(&f, &kept).await;
 
-    // Within the retention the revoked grant stays, its rotated token too:
-    // only the used codes and cached documents go.
+    // Within the retention both ended grants stay, the rotated token too:
+    // only the three used codes go.
     f.store
         .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS - 1));
-    f.store.sweep().await.unwrap();
-    assert!(f.store.find_grant(ended.id).await.unwrap().is_some());
+    assert_eq!(f.store.sweep().await.unwrap(), 3);
+    assert!(f.store.find_grant(revoked.id).await.unwrap().is_some());
+    assert!(f.store.find_grant(expired.id).await.unwrap().is_some());
     assert!(
         f.store
             .find_refresh_token(&grantry::token::hash_token(&first))
@@ -733,12 +771,15 @@ async fn sweep_removes_ended_grants_after_retention() {
             .is_some()
     );
 
-    // Past it: the grant, both its refresh tokens and its client, which has
-    // no grant left: four rows.
-    f.store.age(Duration::days(2));
-    assert_eq!(f.store.sweep().await.unwrap(), 4);
-    assert!(f.store.find_grant(ended.id).await.unwrap().is_none());
-    assert!(f.store.use_client(&client_id).await.unwrap().is_none());
+    // Past it for both: each grant with its refresh tokens (two for alice,
+    // one for carol), five rows. Their clients had a grant, so they stay.
+    f.store
+        .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS + 1));
+    assert_eq!(f.store.sweep().await.unwrap(), 5);
+    assert!(f.store.find_grant(revoked.id).await.unwrap().is_none());
+    assert!(f.store.find_grant(expired.id).await.unwrap().is_none());
+    assert!(f.store.use_client(&client_id).await.unwrap().is_some());
+    assert!(f.store.use_client(&carol_client).await.unwrap().is_some());
     assert!(invalid_grant(
         f.server
             .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
@@ -785,6 +826,25 @@ async fn registration_and_sweep() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn sweep_keeps_a_client_with_an_authorization_in_flight() {
+    let f = fixture();
+    let client_id = register(&f).await;
+    let device_client = register(&f).await;
+    f.store.age(Duration::days(8));
+    f.server
+        .authorize(&authorize_query(&client_id, CALLBACK, "read"))
+        .await
+        .unwrap();
+    f.server
+        .start_device(&device_client, "cli", "read")
+        .await
+        .unwrap();
+    f.store.sweep().await.unwrap();
+    assert!(f.store.use_client(&client_id).await.unwrap().is_some());
+    assert!(f.store.use_client(&device_client).await.unwrap().is_some());
 }
 
 // --- Device authorization grant (RFC 8628) -----------------------------------

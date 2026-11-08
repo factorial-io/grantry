@@ -100,6 +100,12 @@ pub trait MetadataFetcher: Send + Sync {
 /// A [`MetadataFetcher`] that refuses every fetch, for hosts that do not
 /// resolve Client ID Metadata Documents (only registered or pre-issued
 /// clients). A URL `client_id` is then refused.
+///
+/// [`AuthorizationServerMetadata::new`](crate::metadata::AuthorizationServerMetadata::new)
+/// still advertises `client_id_metadata_document_supported: true`; set that
+/// public field to `false` so the served metadata does not announce URL
+/// `client_id`s that will all be refused. A document already cached in the
+/// store still resolves until it expires.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoFetch;
 

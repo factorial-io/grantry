@@ -5,7 +5,7 @@
 //! An in-memory [`OAuthStore`] for tests and examples. One mutex makes every
 //! method atomic. Not for production: nothing survives a restart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
@@ -19,9 +19,7 @@ use crate::store::{
     Pending, RefreshToken, RegisteredClient,
 };
 
-/// How long a registered client may go without a grant (none yet, or all swept) before
-/// [`OAuthStore::sweep`] removes it.
-pub const UNUSED_CLIENT_DAYS: i64 = 7;
+pub use crate::store::UNUSED_CLIENT_DAYS;
 
 struct Inner<S> {
     clients: HashMap<String, RegisteredClient>,
@@ -34,6 +32,11 @@ struct Inner<S> {
     refresh: HashMap<String, RefreshToken>,
     /// By device-code hash.
     devices: HashMap<String, Device<S>>,
+    /// Registered clients that had a grant swept: they had a grant, so they
+    /// stay. ponytail: recorded at sweep time, which suffices because only
+    /// sweep removes grants here; never shrinks, as clients are never removed
+    /// once they had a grant.
+    swept_clients: HashSet<String>,
 }
 
 impl<S> Inner<S> {
@@ -74,6 +77,7 @@ impl<S> Default for MemoryStore<S> {
                 codes: HashMap::new(),
                 refresh: HashMap::new(),
                 devices: HashMap::new(),
+                swept_clients: HashSet::new(),
             }),
         }
     }
@@ -202,13 +206,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     ) -> Result<Option<Pending<S>>, BackendError> {
         let now = Utc::now();
         let mut inner = self.lock();
-        let Some(row) = inner.pending.get_mut(&id) else {
+        let Some(row) = inner.pending.get_mut(&id).filter(|p| p.expires_at > now) else {
             return Ok(None);
         };
         if row.subject.is_none() {
             row.subject = Some(subject.clone());
         }
-        if row.expires_at <= now || row.subject.as_ref() != Some(subject) {
+        if row.subject.as_ref() != Some(subject) {
             return Ok(None);
         }
         Ok(inner.pending.remove(&id))
@@ -458,25 +462,37 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         };
         let before = count(&inner);
         let ended = now - Duration::days(GRANT_RETENTION_DAYS);
-        inner
-            .grants
-            .retain(|_, g| g.expires_at.min(g.revoked_at.unwrap_or(g.expires_at)) >= ended);
         let Inner {
             grants,
             codes,
             refresh,
+            clients,
+            swept_clients,
             ..
         } = &mut *inner;
+        grants.retain(|_, g| {
+            let keep = g.expires_at.min(g.revoked_at.unwrap_or(g.expires_at)) >= ended;
+            if !keep && clients.contains_key(&g.client_id) {
+                swept_clients.insert(g.client_id.clone());
+            }
+            keep
+        });
         codes.retain(|_, c| c.expires_at > now && grants.contains_key(&c.grant_id));
         refresh.retain(|_, t| grants.contains_key(&t.grant_id));
         inner.pending.retain(|_, p| p.expires_at > now);
         inner.devices.retain(|_, d| d.expires_at > now);
         inner.documents.retain(|_, (_, expires)| *expires > now);
-        let granted: Vec<String> = inner.grants.values().map(|g| g.client_id.clone()).collect();
+        // A client that ever had a grant, or has an authorization in flight, stays.
+        let in_use: HashSet<String> = (inner.grants.values().map(|g| &g.client_id))
+            .chain(inner.pending.values().map(|p| &p.client_id))
+            .chain(inner.devices.values().map(|d| &d.client_id))
+            .chain(&inner.swept_clients)
+            .cloned()
+            .collect();
         let cutoff = now - Duration::days(UNUSED_CLIENT_DAYS);
         inner
             .clients
-            .retain(|id, c| c.created_at >= cutoff || granted.contains(id));
+            .retain(|id, c| c.created_at >= cutoff || in_use.contains(id));
         Ok(u64::try_from(before - count(&inner)).unwrap_or(0))
     }
 }
@@ -507,6 +523,21 @@ mod tests {
         assert!(
             store
                 .claim_pending(id, &"alice".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.lock().pending[&id].subject, None);
+    }
+
+    #[tokio::test]
+    async fn take_pending_does_not_bind_an_expired_request() {
+        let store = MemoryStore::<String>::default();
+        let id = store.insert_pending(request()).await.unwrap().id;
+        store.age(Duration::seconds(601));
+        assert!(
+            store
+                .take_pending(id, &"alice".into())
                 .await
                 .unwrap()
                 .is_none()
