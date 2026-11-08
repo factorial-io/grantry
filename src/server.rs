@@ -283,6 +283,19 @@ impl PollError {
     }
 }
 
+/// Why [`Server::verify_active`] refused an access token. Answer all but
+/// `Backend` with 401 `invalid_token` (RFC 6750 §3.1).
+#[derive(Debug, thiserror::Error)]
+pub enum ActiveError {
+    #[error(transparent)]
+    Invalid(#[from] VerifyError),
+    /// The token verifies, but its grant is unknown, revoked or expired.
+    #[error("grant is not active")]
+    Inactive,
+    #[error(transparent)]
+    Backend(BackendError),
+}
+
 impl From<BackendError> for PollError {
     fn from(e: BackendError) -> Self {
         Self::Token(TokenError::Backend(e))
@@ -887,8 +900,8 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     }
 
     /// Verify an access token's signature, expiry, audience and kind; its
-    /// claims. Whether its grant is still live is the caller's next question
-    /// (`store().find_grant`).
+    /// claims. Whether its grant is still live is the caller's next question:
+    /// [`Self::verify_active`] answers both.
     pub fn verify(&self, token: &str) -> Result<Map<String, Value>, VerifyError> {
         token::verify(
             &self.config.signer,
@@ -907,5 +920,27 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             &self.config.resource,
             &self.config.token_kind,
         )
+    }
+
+    /// [`Self::verify`], then the token's grant, which must still be active:
+    /// a revoked or expired grant ends its access tokens before they expire.
+    /// The grant and the claims.
+    pub async fn verify_active(
+        &self,
+        token: &str,
+    ) -> Result<(Grant<S>, Map<String, Value>), ActiveError> {
+        let claims = self.verify(token)?;
+        let Some(id) = claims
+            .get("grant_id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse().ok())
+        else {
+            return Err(ActiveError::Inactive);
+        };
+        match self.store.find_grant(id).await {
+            Ok(Some(grant)) if grant.is_active(Utc::now()) => Ok((grant, claims)),
+            Ok(_) => Err(ActiveError::Inactive),
+            Err(e) => Err(ActiveError::Backend(e)),
+        }
     }
 }

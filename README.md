@@ -78,8 +78,8 @@ let approved = server.approve(pending.id, &user_id, None).await?;
 // redirect the browser to approved.redirect
 // POST /token:
 let tokens = server.exchange_code(&form, form.get("client_id").map(String::as_str), None).await?;
-// Your resource server:
-let claims = server.verify(bearer)?;
+// Your resource server: the token verifies and its grant is still active.
+let (grant, claims) = server.verify_active(bearer).await?;
 ```
 
 ### Device login

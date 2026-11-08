@@ -15,7 +15,7 @@ use chrono::Duration;
 use grantry::client::{ClientError, DocumentPolicy, FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::server::{
-    ApproveError, AuthorizeError, PageError, PollError, TokenError, TokenResponse,
+    ActiveError, ApproveError, AuthorizeError, PageError, PollError, TokenError, TokenResponse,
 };
 use grantry::store::{BackendError, Events, Grant, OAuthStore};
 use grantry::{Config, Recheck, ScopeSpec, Server, Signer, Subjects};
@@ -735,6 +735,26 @@ async fn revoke_is_recorded_once() {
     assert!(f.server.revoke(&grant, "user", None).await.unwrap());
     assert!(!f.server.revoke(&grant, "user", None).await.unwrap());
     assert_eq!(f.log.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn verify_active_refuses_tokens_of_ended_grants() {
+    let f = fixture();
+    let (_, tokens) = connect(&f, "alice").await;
+    let (grant, claims) = f.server.verify_active(&tokens.access_token).await.unwrap();
+    assert_eq!(grant.subject, "alice");
+    assert_eq!(claims["pid"], json!("alice"));
+    assert!(matches!(
+        f.server.verify_active("not-a-jwt").await,
+        Err(ActiveError::Invalid(_))
+    ));
+    // The token still verifies; its grant no longer answers for it.
+    f.server.revoke(&grant, "logout", None).await.unwrap();
+    assert!(f.server.verify(&tokens.access_token).is_ok());
+    assert!(matches!(
+        f.server.verify_active(&tokens.access_token).await,
+        Err(ActiveError::Inactive)
+    ));
 }
 
 #[tokio::test]
