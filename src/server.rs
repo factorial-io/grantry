@@ -614,18 +614,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     /// tokens.
     pub async fn refresh(
         &self,
-        form: &HashMap<String, String>,
-        client_id: Option<&str>,
+        refresh_token: &str,
+        client_id: &str,
         client_ip: Option<&str>,
     ) -> Result<(Grant<S>, TokenResponse), TokenError> {
-        let (Some(presented), Some(client_id)) = (form.get("refresh_token"), client_id) else {
-            return Err(TokenError::InvalidRequest(
-                "refresh_token and client_id are required.",
-            ));
-        };
         let token = self
             .store
-            .find_refresh_token(&hash_token(presented))
+            .find_refresh_token(&hash_token(refresh_token))
             .await?
             .ok_or(TokenError::InvalidGrant)?;
         let grant = self

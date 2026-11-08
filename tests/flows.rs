@@ -517,9 +517,9 @@ async fn code_reuse_revokes_the_grant() {
     assert_eq!(grant.revoke_reason.as_deref(), Some("code_reuse"));
     assert_eq!(*f.log.0.lock().unwrap(), ["code_reuse@10.0.0.1"]);
     // The first exchange's refresh token dies with the grant.
-    let refresh = form(&[("refresh_token", first.refresh_token.as_deref().unwrap())]);
+    let refresh = first.refresh_token.as_deref().unwrap();
     assert!(invalid_grant(
-        f.server.refresh(&refresh, Some(&client_id), None).await
+        f.server.refresh(refresh, &client_id, None).await
     ));
 }
 
@@ -543,18 +543,10 @@ async fn refresh_rotates_and_reuse_revokes() {
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
     let refresh = |token: &str, client: &str| {
-        let (server, form, client) = (
-            f.server.clone(),
-            form(&[("refresh_token", token)]),
-            client.to_string(),
-        );
-        async move { server.refresh(&form, Some(&client), None).await }
+        let (server, token, client) = (f.server.clone(), token.to_string(), client.to_string());
+        async move { server.refresh(&token, &client, None).await }
     };
 
-    assert!(matches!(
-        f.server.refresh(&form(&[]), Some(&client_id), None).await,
-        Err(TokenError::InvalidRequest(_))
-    ));
     assert!(invalid_grant(refresh(&first, "other-client").await));
     let (grant, second) = refresh(&first, &client_id).await.unwrap();
     let next = second.refresh_token.clone().unwrap();
@@ -595,16 +587,10 @@ async fn a_host_token_format_shapes_refresh_tokens() {
     let first = tokens.refresh_token.unwrap();
     assert!(first.starts_with("host_rt_"), "{first}");
 
-    let (_, second) = f
-        .server
-        .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
-        .await
-        .unwrap();
+    let (_, second) = f.server.refresh(&first, &client_id, None).await.unwrap();
     assert!(second.refresh_token.unwrap().starts_with("host_rt_"));
     assert!(invalid_grant(
-        f.server
-            .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
-            .await
+        f.server.refresh(&first, &client_id, None).await
     ));
 }
 
@@ -614,28 +600,16 @@ async fn an_idle_refresh_token_expires_without_revoking_the_grant() {
     f.server = f.server.with_refresh_idle(Duration::hours(1));
     let (client_id, tokens) = connect(&f, "alice").await;
     let fresh = tokens.refresh_token.clone().unwrap();
-    let (_, refreshed) = f
-        .server
-        .refresh(&form(&[("refresh_token", &fresh)]), Some(&client_id), None)
-        .await
-        .unwrap();
+    let (_, refreshed) = f.server.refresh(&fresh, &client_id, None).await.unwrap();
 
     // The same grant, with an idle lifetime its newest token has outlived.
     let idle = f.server.clone().with_refresh_idle(Duration::zero());
     let next = refreshed.refresh_token.clone().unwrap();
-    assert!(invalid_grant(
-        idle.refresh(&form(&[("refresh_token", &next)]), Some(&client_id), None)
-            .await
-    ));
+    assert!(invalid_grant(idle.refresh(&next, &client_id, None).await));
     // Expiry is not theft: the grant lives, and the token still refreshes
     // where the idle lifetime has not run out.
     assert!(grant_of(&f, &refreshed).await.revoked_at.is_none());
-    assert!(
-        f.server
-            .refresh(&form(&[("refresh_token", &next)]), Some(&client_id), None)
-            .await
-            .is_ok()
-    );
+    assert!(f.server.refresh(&next, &client_id, None).await.is_ok());
 }
 
 #[tokio::test]
@@ -657,11 +631,7 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
     let refresh = tokens.refresh_token.unwrap();
     let next = f
         .server
-        .refresh(
-            &form(&[("refresh_token", &refresh)]),
-            Some("host-web"),
-            None,
-        )
+        .refresh(&refresh, "host-web", None)
         .await
         .unwrap()
         .1
@@ -669,9 +639,7 @@ async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
         .unwrap();
     assert!(f.server.revoke(&grant, "logout", None).await.unwrap());
     assert!(invalid_grant(
-        f.server
-            .refresh(&form(&[("refresh_token", &next)]), Some("host-web"), None)
-            .await
+        f.server.refresh(&next, "host-web", None).await
     ));
 
     // No offline scope, no refresh token; an unknown scope is refused.
@@ -702,9 +670,9 @@ async fn refresh_rechecks_the_subject() {
     let f = fixture();
     let (client_id, tokens) = connect(&f, "alice").await;
     f.users.revoked.lock().unwrap().push("alice");
-    let refresh = form(&[("refresh_token", tokens.refresh_token.as_deref().unwrap())]);
+    let refresh = tokens.refresh_token.as_deref().unwrap();
     assert!(invalid_grant(
-        f.server.refresh(&refresh, Some(&client_id), None).await
+        f.server.refresh(refresh, &client_id, None).await
     ));
     assert_eq!(
         grant_of(&f, &tokens).await.revoke_reason.as_deref(),
@@ -713,7 +681,7 @@ async fn refresh_rechecks_the_subject() {
     // A refused refresh rotated nothing.
     f.users.revoked.lock().unwrap().clear();
     assert!(invalid_grant(
-        f.server.refresh(&refresh, Some(&client_id), None).await
+        f.server.refresh(refresh, &client_id, None).await
     ));
 }
 
@@ -722,9 +690,9 @@ async fn grant_lifetime_is_absolute() {
     let f = fixture();
     let (client_id, tokens) = connect(&f, "alice").await;
     f.store.age(Duration::days(91));
-    let refresh = form(&[("refresh_token", tokens.refresh_token.as_deref().unwrap())]);
+    let refresh = tokens.refresh_token.as_deref().unwrap();
     assert!(invalid_grant(
-        f.server.refresh(&refresh, Some(&client_id), None).await
+        f.server.refresh(refresh, &client_id, None).await
     ));
 }
 
@@ -767,11 +735,7 @@ async fn sweep_removes_ended_grants_after_retention() {
     f.store.age(Duration::days(62));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
-    let (_, rotated) = f
-        .server
-        .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
-        .await
-        .unwrap();
+    let (_, rotated) = f.server.refresh(&first, &client_id, None).await.unwrap();
     let revoked = grant_of(&f, &rotated).await;
     assert!(f.server.revoke(&revoked, "user", None).await.unwrap());
     let (_, kept) = connect(&f, "bob").await;
@@ -802,9 +766,7 @@ async fn sweep_removes_ended_grants_after_retention() {
     assert!(f.store.use_client(&client_id).await.unwrap().is_some());
     assert!(f.store.use_client(&carol_client).await.unwrap().is_some());
     assert!(invalid_grant(
-        f.server
-            .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
-            .await
+        f.server.refresh(&first, &client_id, None).await
     ));
     assert!(f.store.find_grant(kept.id).await.unwrap().is_some());
 }
@@ -947,12 +909,7 @@ async fn a_device_login_is_approved_once_and_polled_politely() {
     assert_eq!(claims["client_id"], json!(CLI));
     assert_eq!(claims["grant_id"], json!(grant.id.to_string()));
     let refresh = tokens.refresh_token.unwrap();
-    assert!(
-        f.server
-            .refresh(&form(&[("refresh_token", &refresh)]), Some(CLI), None)
-            .await
-            .is_ok()
-    );
+    assert!(f.server.refresh(&refresh, CLI, None).await.is_ok());
 
     let again = poll(&f, &device_code).await.unwrap_err();
     assert!(matches!(again, PollError::Token(TokenError::InvalidGrant)));

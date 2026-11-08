@@ -148,11 +148,16 @@ where
                 .exchange_code(&form, client_id.as_deref(), None)
                 .await
         }
-        Some("refresh_token") => state
-            .server
-            .refresh(&form, client_id.as_deref(), None)
-            .await
-            .map(|(_, tokens)| tokens),
+        Some("refresh_token") => {
+            let (Some(token), Some(client_id)) = (form.get("refresh_token"), client_id) else {
+                return invalid("refresh_token and client_id are required.");
+            };
+            state
+                .server
+                .refresh(token, &client_id, None)
+                .await
+                .map(|(_, tokens)| tokens)
+        }
         Some(_) => {
             return match &state.routes.other_grant {
                 Some(hook) => hook(form, headers).await,

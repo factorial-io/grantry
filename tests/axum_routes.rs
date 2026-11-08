@@ -256,6 +256,13 @@ async fn refusals_are_rfc_bodies() {
     .await;
     assert_eq!(body["error"], "invalid_request");
 
+    let (_, _, body) = call(
+        &app,
+        form("/oauth/token", &[("grant_type", "refresh_token")]),
+    )
+    .await;
+    assert_eq!(body["error"], "invalid_request");
+
     let (status, _, _) = call(
         &app,
         Request::get("/oauth/authorize?client_id=unknown")
