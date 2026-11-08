@@ -248,6 +248,15 @@ pub trait OAuthStore: Send + Sync {
     /// by a live authorization, so the server draws another. *Live* means
     /// unexpired, whatever its status: a denied or redeemed code stays taken
     /// until it expires.
+    ///
+    /// *Atomic*: checking that the code is free and inserting are one
+    /// operation, so two calls with the same code never both return `Some`.
+    /// A plain `UNIQUE(user_code)` is too strict while expired rows remain
+    /// unswept, and a partial unique index cannot express "unexpired" (its
+    /// predicate cannot use the clock). Serialize the check and the insert
+    /// instead: a conditional `INSERT ... SELECT ... WHERE NOT EXISTS
+    /// (unexpired row with that code)` in a serializable transaction, or
+    /// behind a lock (SQLite's write lock, a Postgres advisory lock).
     async fn insert_device(
         &self,
         new: NewDevice,
