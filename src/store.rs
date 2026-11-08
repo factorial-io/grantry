@@ -85,6 +85,19 @@ impl<S> Grant<S> {
     }
 }
 
+/// A grant the host creates for a subject it has already authenticated
+/// ([`crate::Server::issue_grant`]): no authorization request, no code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewGrant<S> {
+    pub subject: S,
+    pub client_id: String,
+    pub client_name: String,
+    /// The canonical scope string.
+    pub scope: String,
+    /// The absolute lifetime.
+    pub lifetime: Duration,
+}
+
 /// An authorization code, stored by its hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Code {
@@ -185,6 +198,17 @@ pub trait OAuthStore: Send + Sync {
 
     async fn find_grant(&self, id: Uuid) -> Result<Option<Grant<Self::Subject>>, BackendError>;
 
+    /// Create a grant the host issued directly ([`crate::Server::issue_grant`]),
+    /// with no redirect URI. A store whose host never does that may leave the
+    /// default, which refuses.
+    async fn create_grant(
+        &self,
+        new: NewGrant<Self::Subject>,
+    ) -> Result<Grant<Self::Subject>, BackendError> {
+        let _ = new;
+        Err("this store does not create grants directly".into())
+    }
+
     /// Revoke grant `id` for `reason`. *Atomic:* `false` when it was already
     /// revoked or does not exist, so a revocation is recorded once.
     async fn revoke_grant(&self, id: Uuid, reason: &str) -> Result<bool, BackendError>;
@@ -236,7 +260,7 @@ pub trait Subjects<S>: Send + Sync {
 /// Hooks for audit and tracing. Called after the store committed.
 #[async_trait]
 pub trait Events<S>: Send + Sync {
-    /// A grant was created by an approve.
+    /// A grant was created by an approve or [`crate::Server::issue_grant`].
     async fn grant_created(&self, _grant: &Grant<S>) {}
 
     /// A grant was revoked by a flow (reuse, a failed recheck) or by

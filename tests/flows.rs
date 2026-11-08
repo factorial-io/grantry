@@ -603,6 +603,65 @@ async fn an_idle_refresh_token_expires_without_revoking_the_grant() {
 }
 
 #[tokio::test]
+async fn a_host_issued_grant_refreshes_and_revokes_like_any_other() {
+    let f = fixture();
+    let (grant, tokens) = f
+        .server
+        .issue_grant(&"alice", "host-web", "Browser", "offline_access read")
+        .await
+        .unwrap();
+    assert_eq!(grant.subject, "alice");
+    assert_eq!(grant.scope, "read offline_access", "canonical order");
+    assert_eq!(grant.redirect_uri, "");
+    let claims = f.server.verify(&tokens.access_token).unwrap();
+    assert_eq!(claims["grant_id"], json!(grant.id.to_string()));
+    assert_eq!(claims["client_id"], json!("host-web"));
+    assert_eq!(claims["pid"], json!("alice"), "the host's claims");
+
+    let refresh = tokens.refresh_token.unwrap();
+    let next = f
+        .server
+        .refresh(
+            &form(&[("refresh_token", &refresh)]),
+            Some("host-web"),
+            None,
+        )
+        .await
+        .unwrap()
+        .refresh_token
+        .unwrap();
+    assert!(f.server.revoke(&grant, "logout", None).await.unwrap());
+    assert!(invalid_grant(
+        f.server
+            .refresh(&form(&[("refresh_token", &next)]), Some("host-web"), None)
+            .await
+    ));
+
+    // No offline scope, no refresh token; an unknown scope is refused.
+    let (_, online) = f
+        .server
+        .issue_grant(&"alice", "host-web", "Browser", "")
+        .await
+        .unwrap();
+    assert!(online.refresh_token.is_none());
+    assert!(matches!(
+        f.server
+            .issue_grant(&"alice", "host-web", "Browser", "admin")
+            .await,
+        Err(TokenError::InvalidRequest(_))
+    ));
+
+    // The subject check runs here too: a removed user gets no tokens.
+    f.users.revoked.lock().unwrap().push("bob");
+    assert!(invalid_grant(
+        f.server
+            .issue_grant(&"bob", "host-web", "Browser", "read")
+            .await
+            .map(|(_, t)| t)
+    ));
+}
+
+#[tokio::test]
 async fn refresh_rechecks_the_subject() {
     let f = fixture();
     let (client_id, tokens) = connect(&f, "alice").await;

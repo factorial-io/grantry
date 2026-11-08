@@ -24,8 +24,8 @@ use crate::redirect::with_params;
 use crate::request::{self, Registration, RegistrationError};
 use crate::scope::ScopeSpec;
 use crate::store::{
-    BackendError, Events, Grant, NewPending, OAuthStore, Pending, Recheck, RegisteredClient,
-    Subjects, reason,
+    BackendError, Events, Grant, NewGrant, NewPending, OAuthStore, Pending, Recheck,
+    RegisteredClient, Subjects, reason,
 };
 use crate::token::{
     self, AccessClaims, Base64Url, Opaque, Signer, TokenFormat, VerifyError, hash_token,
@@ -585,6 +585,53 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             return Err(TokenError::InvalidGrant);
         }
         Ok(self.response(access_token, &grant, Some(next)))
+    }
+
+    /// Create a grant for `subject`, whom the host has already authenticated
+    /// (a browser login after its identity provider, say), and issue its
+    /// tokens: the authorization-code flow without the redirect. `scope` is
+    /// checked against the known scopes; empty means the default scope. A
+    /// refresh token comes with an offline scope, as in [`Self::exchange_code`].
+    pub async fn issue_grant(
+        &self,
+        subject: &S,
+        client_id: &str,
+        client_name: &str,
+        scope: &str,
+    ) -> Result<(Grant<S>, TokenResponse), TokenError> {
+        let scope = if scope.trim().is_empty() {
+            self.config.scopes.default_scope()
+        } else {
+            let parsed = self
+                .config
+                .scopes
+                .parse(scope)
+                .map_err(|_| TokenError::InvalidRequest("Unknown scope."))?;
+            self.config.scopes.join(&parsed)
+        };
+        let grant = self
+            .store
+            .create_grant(NewGrant {
+                subject: subject.clone(),
+                client_id: client_id.to_owned(),
+                client_name: client_name.to_owned(),
+                scope,
+                lifetime: self.config.grant_lifetime,
+            })
+            .await?;
+        self.events.grant_created(&grant).await;
+        let access_token = self.issue(&grant, None).await?;
+        let refresh_token = if self.config.scopes.is_offline(&grant.scope) {
+            let token = self.tokens.mint(Opaque::RefreshToken);
+            self.store
+                .insert_refresh_token(&grant, hash_token(&token))
+                .await?;
+            Some(token)
+        } else {
+            None
+        };
+        let response = self.response(access_token, &grant, refresh_token);
+        Ok((grant, response))
     }
 
     /// Run the subject check for `grant` and mint its access token, revoking

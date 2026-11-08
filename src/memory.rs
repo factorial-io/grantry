@@ -14,7 +14,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::store::{
-    BackendError, Code, Grant, NewPending, OAuthStore, Pending, RefreshToken, RegisteredClient,
+    BackendError, Code, Grant, NewGrant, NewPending, OAuthStore, Pending, RefreshToken,
+    RegisteredClient,
 };
 
 /// How long a registered client may go without a grant before
@@ -216,6 +217,25 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         let mut inner = self.lock();
         inner.grants.insert(grant.id, grant.clone());
         inner.codes.insert(code_hash, code);
+        Ok(grant)
+    }
+
+    async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
+        let now = Utc::now();
+        let grant = Grant {
+            id: Uuid::new_v4(),
+            subject: new.subject,
+            client_id: new.client_id,
+            client_name: new.client_name,
+            redirect_uri: String::new(),
+            scope: new.scope,
+            created_at: now,
+            expires_at: now + new.lifetime,
+            last_refreshed_at: None,
+            revoked_at: None,
+            revoke_reason: None,
+        };
+        self.lock().grants.insert(grant.id, grant.clone());
         Ok(grant)
     }
 
