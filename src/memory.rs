@@ -185,13 +185,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     ) -> Result<Option<Pending<S>>, BackendError> {
         let now = Utc::now();
         let mut inner = self.lock();
-        let Some(row) = inner.pending.get_mut(&id) else {
+        let Some(row) = inner.pending.get_mut(&id).filter(|p| p.expires_at > now) else {
             return Ok(None);
         };
         if row.subject.is_none() {
             row.subject = Some(subject.clone());
         }
-        Ok((row.expires_at > now && row.subject.as_ref() == Some(subject)).then(|| row.clone()))
+        Ok((row.subject.as_ref() == Some(subject)).then(|| row.clone()))
     }
 
     async fn take_pending(
@@ -466,5 +466,39 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             + inner.clients.len()
             + inner.devices.len();
         Ok(u64::try_from(before - after).unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> NewPending {
+        NewPending {
+            client_id: "c".into(),
+            client_name: "c".into(),
+            loopback_only: true,
+            redirect_uri: "http://localhost/cb".into(),
+            scope: "read".into(),
+            state: None,
+            code_challenge: "x".into(),
+            resource: "r".into(),
+            ttl: Duration::seconds(600),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_pending_does_not_bind_an_expired_request() {
+        let store = MemoryStore::<String>::default();
+        let id = store.insert_pending(request()).await.unwrap().id;
+        store.age(Duration::seconds(601));
+        assert!(
+            store
+                .claim_pending(id, &"alice".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.lock().pending[&id].subject, None);
     }
 }

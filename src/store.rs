@@ -142,6 +142,12 @@ pub struct RefreshToken {
 ///
 /// Every method that says *atomic* is a race guard the flows rely on: two
 /// concurrent calls must never both succeed.
+///
+/// Timestamps may be kept at any precision the backend offers (the
+/// [`crate::memory::MemoryStore`] keeps nanoseconds, a SQL column often
+/// microseconds or milliseconds). grantry never compares a row a write
+/// returned with the same row read back later; it compares ids and orders
+/// timestamps against the clock, so sub-second truncation is harmless.
 #[async_trait]
 pub trait OAuthStore: Send + Sync {
     /// Whom a grant is for.
@@ -178,7 +184,7 @@ pub trait OAuthStore: Send + Sync {
     ///
     /// *Atomic:* the first call binds an unbound request to its subject; from
     /// then on it is `None` for every other subject, exactly as for an unknown
-    /// id.
+    /// id. An expired request is `None` and is not bound.
     async fn claim_pending(
         &self,
         id: Uuid,
@@ -232,7 +238,9 @@ pub trait OAuthStore: Send + Sync {
 
     /// Store a pending device authorization; the store assigns the id and
     /// sets `expires_at = now + ttl`. `None` when `user_code` is already taken
-    /// by a live authorization, so the server draws another.
+    /// by a live authorization, so the server draws another. *Live* means
+    /// unexpired, whatever its status: a denied or redeemed code stays taken
+    /// until it expires.
     async fn insert_device(
         &self,
         new: NewDevice,
