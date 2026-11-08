@@ -27,7 +27,7 @@
 //! rules are [`device`]. The pure rules are usable on their own:
 //! [`pkce`], [`redirect`], [`scope`], [`request`], [`token`], [`metadata`].
 //!
-//! The `axum` feature mounts the protocol routes ([`routes`]).
+//! The `axum` feature mounts the protocol routes (the `routes` module).
 
 pub mod client;
 pub mod device;
