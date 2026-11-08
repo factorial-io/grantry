@@ -536,6 +536,42 @@ async fn refresh_rotates_and_reuse_revokes() {
     assert!(invalid_grant(refresh(&next, &client_id).await));
 }
 
+/// A host format: refresh tokens carry the host's prefix, codes stay
+/// grantry's, and the flows look them up by hash as before.
+struct Prefixed;
+
+impl grantry::token::TokenFormat for Prefixed {
+    fn mint(&self, kind: grantry::token::Opaque) -> String {
+        match kind {
+            grantry::token::Opaque::RefreshToken => {
+                format!("host_rt_{}", grantry::token::random_token())
+            }
+            _ => grantry::token::random_token(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_host_token_format_shapes_refresh_tokens() {
+    let mut f = fixture();
+    f.server = f.server.with_token_format(Arc::new(Prefixed));
+    let (client_id, tokens) = connect(&f, "alice").await;
+    let first = tokens.refresh_token.unwrap();
+    assert!(first.starts_with("host_rt_"), "{first}");
+
+    let second = f
+        .server
+        .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
+        .await
+        .unwrap();
+    assert!(second.refresh_token.unwrap().starts_with("host_rt_"));
+    assert!(invalid_grant(
+        f.server
+            .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
+            .await
+    ));
+}
+
 #[tokio::test]
 async fn refresh_rechecks_the_subject() {
     let f = fixture();

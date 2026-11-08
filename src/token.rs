@@ -21,6 +21,34 @@ pub fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
+/// Which opaque token the server is minting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Opaque {
+    /// An authorization code.
+    Code,
+    /// A refresh token.
+    RefreshToken,
+}
+
+/// How the server mints its opaque tokens, for a host whose tokens have a
+/// recognisable shape (a prefix secret scanners match, say). Whatever it
+/// mints is stored and looked up only as [`hash_token`], so it must be
+/// high-entropy; the shape is the host's.
+pub trait TokenFormat: Send + Sync {
+    fn mint(&self, kind: Opaque) -> String;
+}
+
+/// The default format: [`random_token`] for every kind.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Base64Url;
+
+impl TokenFormat for Base64Url {
+    fn mint(&self, _kind: Opaque) -> String {
+        random_token()
+    }
+}
+
 /// How a code or refresh token is stored and looked up: SHA-256, hex. The
 /// tokens are high-entropy and single-purpose, so a slow hash buys nothing.
 pub fn hash_token(token: &str) -> String {

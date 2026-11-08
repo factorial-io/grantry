@@ -27,7 +27,9 @@ use crate::store::{
     BackendError, Events, Grant, NewPending, OAuthStore, Pending, Recheck, RegisteredClient,
     Subjects, reason,
 };
-use crate::token::{self, AccessClaims, Signer, VerifyError, hash_token, random_token};
+use crate::token::{
+    self, AccessClaims, Base64Url, Opaque, Signer, TokenFormat, VerifyError, hash_token,
+};
 
 /// What the flows need to know.
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub struct Server<S> {
     subjects: Arc<dyn Subjects<S>>,
     events: Arc<dyn Events<S>>,
     fetcher: Arc<dyn MetadataFetcher>,
+    tokens: Arc<dyn TokenFormat>,
 }
 
 impl<S> Clone for Server<S> {
@@ -68,6 +71,7 @@ impl<S> Clone for Server<S> {
             subjects: Arc::clone(&self.subjects),
             events: Arc::clone(&self.events),
             fetcher: Arc::clone(&self.fetcher),
+            tokens: Arc::clone(&self.tokens),
         }
     }
 }
@@ -243,7 +247,16 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             subjects,
             events,
             fetcher,
+            tokens: Arc::new(Base64Url),
         }
+    }
+
+    /// Mint codes and refresh tokens in the host's format instead of
+    /// [`Base64Url`].
+    #[must_use]
+    pub fn with_token_format(mut self, tokens: Arc<dyn TokenFormat>) -> Self {
+        self.tokens = tokens;
+        self
     }
 
     /// The store, for the host's own queries (connection lists, sweeps).
@@ -408,7 +421,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             .map_err(ApproveError::Backend)?
             .ok_or(ApproveError::NotFound)?;
         row.scope = scope;
-        let code = random_token();
+        let code = self.tokens.mint(Opaque::Code);
         let grant = self
             .store
             .create_grant_with_code(
@@ -493,7 +506,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         }
         let access_token = self.issue(&grant, client_ip).await?;
         let refresh_token = if self.config.scopes.is_offline(&grant.scope) {
-            let token = random_token();
+            let token = self.tokens.mint(Opaque::RefreshToken);
             self.store
                 .insert_refresh_token(&grant, hash_token(&token))
                 .await?;
@@ -541,7 +554,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         }
         // Checks before rotation, so a refused refresh leaves nothing behind.
         let access_token = self.issue(&grant, client_ip).await?;
-        let next = random_token();
+        let next = self.tokens.mint(Opaque::RefreshToken);
         if !self
             .store
             .rotate_refresh_token(&token, &grant, hash_token(&next))
