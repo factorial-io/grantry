@@ -37,6 +37,8 @@ struct Inner<S> {
     /// sweep removes grants here; never shrinks, as clients are never removed
     /// once they had a grant.
     swept_clients: HashSet<String>,
+    /// When each registered client was last returned by `use_client`.
+    used_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl<S> Inner<S> {
@@ -78,6 +80,7 @@ impl<S> Default for MemoryStore<S> {
                 refresh: HashMap::new(),
                 devices: HashMap::new(),
                 swept_clients: HashSet::new(),
+                used_at: HashMap::new(),
             }),
         }
     }
@@ -105,6 +108,9 @@ impl<S> MemoryStore<S> {
         }
         for c in inner.clients.values_mut() {
             c.created_at -= by;
+        }
+        for at in inner.used_at.values_mut() {
+            *at -= by;
         }
         for (_, at) in inner.documents.values_mut() {
             *at -= by;
@@ -138,7 +144,12 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     }
 
     async fn use_client(&self, id: &str) -> Result<Option<RegisteredClient>, BackendError> {
-        Ok(self.lock().clients.get(id).cloned())
+        let mut inner = self.lock();
+        let client = inner.clients.get(id).cloned();
+        if client.is_some() {
+            inner.used_at.insert(id.to_string(), Utc::now());
+        }
+        Ok(client)
     }
 
     async fn cached_document(&self, url: &str) -> Result<Option<Value>, BackendError> {
@@ -490,9 +501,15 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             .cloned()
             .collect();
         let cutoff = now - Duration::days(UNUSED_CLIENT_DAYS);
-        inner
-            .clients
-            .retain(|id, c| c.created_at >= cutoff || in_use.contains(id));
+        let Inner {
+            clients, used_at, ..
+        } = &mut *inner;
+        clients.retain(|id, c| {
+            c.created_at >= cutoff
+                || used_at.get(id).is_some_and(|at| *at >= cutoff)
+                || in_use.contains(id)
+        });
+        used_at.retain(|id, _| clients.contains_key(id));
         Ok(u64::try_from(before - count(&inner)).unwrap_or(0))
     }
 }
@@ -543,5 +560,48 @@ mod tests {
                 .is_none()
         );
         assert_eq!(store.lock().pending[&id].subject, None);
+    }
+
+    /// Issue #19: a sweep between the store calls of `authorize` and of
+    /// `approve` must not remove an old, never-granted client.
+    #[tokio::test]
+    async fn sweep_keeps_a_client_between_the_calls_of_a_flow() {
+        let store = MemoryStore::<String>::default();
+        store
+            .insert_client("c".into(), "c".into(), &[])
+            .await
+            .unwrap();
+        store.age(Duration::days(UNUSED_CLIENT_DAYS + 1));
+        let alice = "alice".to_string();
+
+        // authorize: resolve, sweep, insert_pending.
+        assert!(store.use_client("c").await.unwrap().is_some());
+        store.sweep().await.unwrap();
+        let id = store.insert_pending(request()).await.unwrap().id;
+
+        // approve: take_pending, sweep, create_grant_with_code.
+        let row = store.take_pending(id, &alice).await.unwrap().unwrap();
+        store.sweep().await.unwrap();
+        store
+            .create_grant_with_code(
+                &row,
+                &alice,
+                Duration::days(1),
+                "h".into(),
+                Duration::seconds(60),
+            )
+            .await
+            .unwrap();
+        assert!(store.lock().clients.contains_key("c"));
+
+        // Unused for longer than the limit, and never granted, it goes.
+        store
+            .insert_client("d".into(), "d".into(), &[])
+            .await
+            .unwrap();
+        store.use_client("d").await.unwrap();
+        store.age(Duration::days(UNUSED_CLIENT_DAYS + 1));
+        store.sweep().await.unwrap();
+        assert!(!store.lock().clients.contains_key("d"));
     }
 }
