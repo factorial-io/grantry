@@ -97,6 +97,21 @@ pub trait MetadataFetcher: Send + Sync {
     async fn fetch(&self, url: &Url, limit: usize) -> Result<Fetched, FetchError>;
 }
 
+/// A [`MetadataFetcher`] that refuses every fetch, for hosts that do not
+/// resolve Client ID Metadata Documents (only registered or pre-issued
+/// clients). A URL `client_id` is then refused.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoFetch;
+
+#[async_trait]
+impl MetadataFetcher for NoFetch {
+    async fn fetch(&self, _url: &Url, _limit: usize) -> Result<Fetched, FetchError> {
+        Err(FetchError(
+            "client metadata documents are not resolved".into(),
+        ))
+    }
+}
+
 /// The metadata document URL `client_id` names, if it is one: an `https`
 /// URL (or `http` when insecure documents are allowed) with a path, no
 /// credentials and no fragment, at most 2048 characters.
@@ -355,6 +370,14 @@ pub(crate) mod tests {
 
     fn url() -> Url {
         Url::parse("https://app.example/client.json").unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_fetch_refuses() {
+        let err = fetch_document(&NoFetch, &url(), &DocumentPolicy::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Refused(_)), "{err}");
     }
 
     #[tokio::test]
