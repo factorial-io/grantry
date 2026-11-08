@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/factorial-io/grantry/compare/v0.3.0...v0.3.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* measure unused clients from their last use, not registration ([#21](https://github.com/factorial-io/grantry/issues/21)) ([ea1e9c1](https://github.com/factorial-io/grantry/commit/ea1e9c1abf130908b905111515138ae53ee8c44e)), closes [#19](https://github.com/factorial-io/grantry/issues/19)
+
 ## [0.3.0](https://github.com/factorial-io/grantry/compare/v0.2.0...v0.3.0) (2026-11-08)
 
 
