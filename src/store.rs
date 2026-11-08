@@ -167,7 +167,16 @@ pub trait OAuthStore: Send + Sync {
         redirect_uris: &[String],
     ) -> Result<RegisteredClient, BackendError>;
 
-    /// The registered client `id`.
+    /// The registered client `id`, recording that it was used now.
+    ///
+    /// [`OAuthStore::sweep`] measures [`UNUSED_CLIENT_DAYS`] from the later of
+    /// registration and last use. [`RegisteredClient`] carries no field for
+    /// it, so a store keeps its own column, stamped in the same statement that
+    /// reads the row (an `UPDATE ... RETURNING`). This is what keeps a sweep
+    /// from removing a client between the store calls of one flow:
+    /// [`crate::Server::authorize`] resolves the client and then inserts the
+    /// pending row, and [`crate::Server::approve`] takes that row and then
+    /// creates the grant, so the client was used shortly before either write.
     async fn use_client(&self, id: &str) -> Result<Option<RegisteredClient>, BackendError>;
 
     /// The cached metadata document for `url`, if it has not expired.
@@ -343,9 +352,13 @@ pub trait OAuthStore: Send + Sync {
     /// Delete expired pending authorizations, device authorizations, codes and
     /// cached documents; grants that expired or were revoked more than
     /// [`GRANT_RETENTION_DAYS`] ago, together with their codes and refresh
-    /// tokens (rotated ones included); and registered clients older than
+    /// tokens (rotated ones included); and registered clients neither
+    /// registered nor used ([`OAuthStore::use_client`]) within
     /// [`UNUSED_CLIENT_DAYS`] that never got a grant and have no unexpired
-    /// pending or device authorization. A client that ever had a grant stays, also
+    /// pending or device authorization. Counting the last use, not only the
+    /// registration, keeps a client from going between the store calls of a
+    /// flow, as long as the pending TTL is well under [`UNUSED_CLIENT_DAYS`].
+    /// A client that ever had a grant stays, also
     /// after its grants are swept. [`RegisteredClient`] carries no field for
     /// that, so a store keeps its own flag on the client row, best set when a
     /// grant is created (so it also holds when a host deletes grants itself);
@@ -371,8 +384,9 @@ pub trait OAuthStore: Send + Sync {
 /// gets the same `invalid_grant`, but no event fires.
 pub const GRANT_RETENTION_DAYS: i64 = 30;
 
-/// How long after registration [`OAuthStore::sweep`] removes a client that
-/// never got a grant and has no unexpired pending or device authorization.
+/// How long after its registration or last use ([`OAuthStore::use_client`])
+/// [`OAuthStore::sweep`] removes a client that never got a grant and has no
+/// unexpired pending or device authorization.
 pub const UNUSED_CLIENT_DAYS: i64 = 7;
 
 const NO_DEVICES: &str = "this store does not keep device authorizations";
