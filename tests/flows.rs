@@ -707,6 +707,10 @@ async fn revoke_is_recorded_once() {
 #[tokio::test]
 async fn sweep_removes_ended_grants_after_retention() {
     let f = fixture();
+    // carol's grant expires (90 days) without being revoked.
+    let (carol_client, carol) = connect(&f, "carol").await;
+    let expired = grant_of(&f, &carol).await;
+    f.store.age(Duration::days(61));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
     let rotated = f
@@ -714,17 +718,18 @@ async fn sweep_removes_ended_grants_after_retention() {
         .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
         .await
         .unwrap();
-    let ended = grant_of(&f, &rotated).await;
-    assert!(f.server.revoke(&ended, "user", None).await.unwrap());
+    let revoked = grant_of(&f, &rotated).await;
+    assert!(f.server.revoke(&revoked, "user", None).await.unwrap());
     let (_, kept) = connect(&f, "bob").await;
     let kept = grant_of(&f, &kept).await;
 
-    // Within the retention the revoked grant stays, its rotated token too:
-    // only the used codes and cached documents go.
+    // Within the retention both ended grants stay, the rotated token too:
+    // only the three used codes go.
     f.store
         .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS - 1));
-    f.store.sweep().await.unwrap();
-    assert!(f.store.find_grant(ended.id).await.unwrap().is_some());
+    assert_eq!(f.store.sweep().await.unwrap(), 3);
+    assert!(f.store.find_grant(revoked.id).await.unwrap().is_some());
+    assert!(f.store.find_grant(expired.id).await.unwrap().is_some());
     assert!(
         f.store
             .find_refresh_token(&grantry::token::hash_token(&first))
@@ -733,12 +738,15 @@ async fn sweep_removes_ended_grants_after_retention() {
             .is_some()
     );
 
-    // Past it: the grant, both its refresh tokens and its client, which has
-    // no grant left: four rows.
-    f.store.age(Duration::days(2));
-    assert_eq!(f.store.sweep().await.unwrap(), 4);
-    assert!(f.store.find_grant(ended.id).await.unwrap().is_none());
-    assert!(f.store.use_client(&client_id).await.unwrap().is_none());
+    // Past it for both: each grant with its refresh tokens (two for alice,
+    // one for carol), five rows. Their clients had a grant, so they stay.
+    f.store
+        .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS + 1));
+    assert_eq!(f.store.sweep().await.unwrap(), 5);
+    assert!(f.store.find_grant(revoked.id).await.unwrap().is_none());
+    assert!(f.store.find_grant(expired.id).await.unwrap().is_none());
+    assert!(f.store.use_client(&client_id).await.unwrap().is_some());
+    assert!(f.store.use_client(&carol_client).await.unwrap().is_some());
     assert!(invalid_grant(
         f.server
             .refresh(&form(&[("refresh_token", &first)]), Some(&client_id), None)
