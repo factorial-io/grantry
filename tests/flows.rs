@@ -573,6 +573,36 @@ async fn a_host_token_format_shapes_refresh_tokens() {
 }
 
 #[tokio::test]
+async fn an_idle_refresh_token_expires_without_revoking_the_grant() {
+    let mut f = fixture();
+    f.server = f.server.with_refresh_idle(Duration::hours(1));
+    let (client_id, tokens) = connect(&f, "alice").await;
+    let fresh = tokens.refresh_token.clone().unwrap();
+    let refreshed = f
+        .server
+        .refresh(&form(&[("refresh_token", &fresh)]), Some(&client_id), None)
+        .await
+        .unwrap();
+
+    // The same grant, with an idle lifetime its newest token has outlived.
+    let idle = f.server.clone().with_refresh_idle(Duration::zero());
+    let next = refreshed.refresh_token.clone().unwrap();
+    assert!(invalid_grant(
+        idle.refresh(&form(&[("refresh_token", &next)]), Some(&client_id), None)
+            .await
+    ));
+    // Expiry is not theft: the grant lives, and the token still refreshes
+    // where the idle lifetime has not run out.
+    assert!(grant_of(&f, &refreshed).await.revoked_at.is_none());
+    assert!(
+        f.server
+            .refresh(&form(&[("refresh_token", &next)]), Some(&client_id), None)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn refresh_rechecks_the_subject() {
     let f = fixture();
     let (client_id, tokens) = connect(&f, "alice").await;

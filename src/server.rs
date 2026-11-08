@@ -61,6 +61,7 @@ pub struct Server<S> {
     events: Arc<dyn Events<S>>,
     fetcher: Arc<dyn MetadataFetcher>,
     tokens: Arc<dyn TokenFormat>,
+    refresh_idle: Option<Duration>,
 }
 
 impl<S> Clone for Server<S> {
@@ -72,6 +73,7 @@ impl<S> Clone for Server<S> {
             events: Arc::clone(&self.events),
             fetcher: Arc::clone(&self.fetcher),
             tokens: Arc::clone(&self.tokens),
+            refresh_idle: self.refresh_idle,
         }
     }
 }
@@ -248,7 +250,18 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             events,
             fetcher,
             tokens: Arc::new(Base64Url),
+            refresh_idle: None,
         }
+    }
+
+    /// A refresh token not used within `idle` of its issue no longer
+    /// refreshes, however long its grant has left: the session ends when its
+    /// holder stops using it. Without this, only the grant's absolute
+    /// lifetime ends it.
+    #[must_use]
+    pub fn with_refresh_idle(mut self, idle: Duration) -> Self {
+        self.refresh_idle = Some(idle);
+        self
     }
 
     /// Mint codes and refresh tokens in the host's format instead of
@@ -549,7 +562,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                 .await?;
             return Err(TokenError::InvalidGrant);
         }
-        if !grant.is_active(Utc::now()) {
+        let now = Utc::now();
+        // Idle expiry after the reuse check, as with the grant's own: a
+        // stolen token presented late is still worth revoking the grant for.
+        let idle_over = self
+            .refresh_idle
+            .is_some_and(|idle| now >= token.issued_at + idle);
+        if idle_over || !grant.is_active(now) {
             return Err(TokenError::InvalidGrant);
         }
         // Checks before rotation, so a refused refresh leaves nothing behind.
