@@ -50,5 +50,8 @@ sha2 = "0.10"
 name = "memory_conformance"
 required-features = ["conformance"]
 
+[workspace]
+members = ["grantry-redis"]
+
 [package.metadata.docs.rs]
 all-features = true
