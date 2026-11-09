@@ -9,7 +9,8 @@
 //! users, consent screens and audit. The host implements four ports:
 //!
 //! - [`store::OAuthStore`]: clients, the metadata-document cache, pending
-//!   authorizations, codes, grants and refresh tokens;
+//!   authorizations, codes, grants and refresh tokens ([`memory::MemoryStore`]
+//!   for tests, the `grantry-redis` crate for Redis / Valkey);
 //! - [`store::Subjects`]: re-checks the user on every token issue and adds the
 //!   app's own claims to the access token;
 //! - [`store::Events`]: grant created / revoked, for audit;
