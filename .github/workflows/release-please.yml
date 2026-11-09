@@ -7,10 +7,16 @@ name: Release-please
 #   - When that PR merges, it tags `vX.Y.Z`, creates the GitHub Release, and
 #     the `publish` job publishes the crate to crates.io.
 #
+# grantry and grantry-redis release separately (tags `vX.Y.Z` and
+# `grantry-redis-vX.Y.Z`). The cargo-workspace plugin bumps grantry-redis's
+# grantry requirement when grantry moves, and publish runs grantry first, so
+# a release of both finds the new grantry on crates.io.
+#
 # `RELEASE_PLZ_TOKEN` is a fine-grained PAT (`contents: write`,
 # `pull-requests: write`), as in flowdrop-rs: a PR or tag pushed with
 # `GITHUB_TOKEN` triggers no workflows, so CI would never run on the release PR.
-# `CARGO_REGISTRY_TOKEN` is a crates.io token scoped to publish `grantry`.
+# `CARGO_REGISTRY_TOKEN` is a crates.io token scoped to publish `grantry` and
+# `grantry-redis` (publish-new for its first release).
 #
 # To cut a specific version (such as 0.1.0 after the rc), add
 # `"release-as": "X.Y.Z"` to the package in release-please-config.json for
@@ -33,7 +39,8 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
+      grantry: ${{ steps.release.outputs['grantry--release_created'] }}
+      grantry-redis: ${{ steps.release.outputs['grantry-redis--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -45,11 +52,14 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.grantry == 'true' || needs.release-please.outputs.grantry-redis == 'true'
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --all-features
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - if: needs.release-please.outputs.grantry == 'true'
+        run: cargo publish -p grantry --all-features
+      - if: needs.release-please.outputs.grantry-redis == 'true'
+        run: cargo publish -p grantry-redis
