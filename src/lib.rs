@@ -31,6 +31,8 @@
 //! The `axum` feature mounts the protocol routes (the `routes` module).
 
 pub mod client;
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod device;
 pub mod memory;
 pub mod metadata;
