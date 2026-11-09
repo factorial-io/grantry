@@ -21,7 +21,7 @@ use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{MethodRouter, get, post};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -65,17 +65,63 @@ pub fn router<S>(server: Server<S>, routes: Routes) -> Router
 where
     S: Clone + PartialEq + Send + Sync + 'static,
 {
-    let mut router = Router::new()
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(metadata::<S>),
-        )
-        .route(&routes.authorize_path, get(authorize::<S>))
-        .route(&routes.token_path, post(token::<S>));
-    if let Some(path) = &routes.register_path {
-        router = router.route(path, post(register::<S>));
+    endpoints(server, routes).router()
+}
+
+/// Each endpoint on its own, for a host that layers one of them (rate
+/// limiting `register`, say): change a field, then call
+/// [`Endpoints::router`].
+///
+/// ```ignore
+/// let mut endpoints = grantry::routes::endpoints(server, routes);
+/// endpoints.register = endpoints.register.map(|(path, r)| (path, r.layer(limiter)));
+/// let app = endpoints.router();
+/// ```
+pub struct Endpoints {
+    /// `GET /.well-known/oauth-authorization-server`.
+    pub metadata: MethodRouter,
+    /// `GET` at [`Routes::authorize_path`].
+    pub authorize: (String, MethodRouter),
+    /// `POST` at [`Routes::token_path`].
+    pub token: (String, MethodRouter),
+    /// `POST` at [`Routes::register_path`], if registration is on.
+    pub register: Option<(String, MethodRouter)>,
+}
+
+impl Endpoints {
+    /// The endpoints mounted at their paths.
+    pub fn router(self) -> Router {
+        let mut router = Router::new()
+            .route("/.well-known/oauth-authorization-server", self.metadata)
+            .route(&self.authorize.0, self.authorize.1)
+            .route(&self.token.0, self.token.1);
+        if let Some((path, register)) = self.register {
+            router = router.route(&path, register);
+        }
+        router
     }
-    router.with_state(Arc::new(AppState { server, routes }))
+}
+
+/// The endpoints [`router`] mounts, not yet mounted.
+pub fn endpoints<S>(server: Server<S>, routes: Routes) -> Endpoints
+where
+    S: Clone + PartialEq + Send + Sync + 'static,
+{
+    let (authorize_path, token_path, register_path) = (
+        routes.authorize_path.clone(),
+        routes.token_path.clone(),
+        routes.register_path.clone(),
+    );
+    let state = Arc::new(AppState { server, routes });
+    Endpoints {
+        metadata: get(metadata::<S>).with_state(state.clone()),
+        authorize: (
+            authorize_path,
+            get(authorize::<S>).with_state(state.clone()),
+        ),
+        token: (token_path, post(token::<S>).with_state(state.clone())),
+        register: register_path.map(|path| (path, post(register::<S>).with_state(state))),
+    }
 }
 
 /// An RFC 6749 §5.2 refusal.
