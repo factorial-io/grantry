@@ -3,13 +3,11 @@
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "bump-minor-pre-major": true,
-  "last-release-sha": "a06c6c1a6995ad02fa1c2cca9f1cca37daea5c1e",
   "packages": {
     "grantry": {
       "release-type": "rust",
       "pull-request-title-pattern": "chore${scope}: release ${version}",
-      "changelog-path": "CHANGELOG.md",
-      "release-as": "0.5.0"
+      "changelog-path": "CHANGELOG.md"
     },
     "grantry-redis": {
       "release-type": "rust",
