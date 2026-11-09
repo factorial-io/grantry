@@ -18,6 +18,11 @@ allow = [
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
 ]
+# Boost Software License (not Business Source): permissive, OSI-approved.
+# xxhash-rust is a required dependency of redis, used by grantry-redis.
+exceptions = [
+    { crate = "xxhash-rust", allow = ["BSL-1.0"] },
+]
 
 [bans]
 multiple-versions = "warn"
