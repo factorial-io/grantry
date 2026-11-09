@@ -16,6 +16,8 @@ default = []
 client-fetch = ["dep:reqwest"]
 # axum routers for metadata, authorize, token and register.
 axum = ["dep:axum"]
+# `conformance`: checks of the `OAuthStore` contract for store crates' tests.
+conformance = ["tokio/macros"]
 
 [dependencies]
 async-trait = "0.1"
@@ -43,6 +45,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 sha2 = "0.10"
+
+[[test]]
+name = "memory_conformance"
+required-features = ["conformance"]
 
 [package.metadata.docs.rs]
 all-features = true
