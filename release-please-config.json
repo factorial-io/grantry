@@ -16,5 +16,8 @@
       "pull-request-title-pattern": "chore${scope}: release grantry-redis ${version}",
       "changelog-path": "CHANGELOG.md"
     }
-  }
+  },
+  "plugins": [
+    "cargo-workspace"
+  ]
 }
