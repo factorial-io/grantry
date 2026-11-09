@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/factorial-io/grantry/compare/v0.4.0...v0.5.0) (2026-11-09)
+
+
+### Features
+
+* add conformance checks for OAuthStore implementations ([a5262a0](https://github.com/factorial-io/grantry/commit/a5262a03d0f8b8f81ee4be29e9323f00a25efb4f))
+* **routes:** expose each endpoint as a MethodRouter so hosts can layer one ([a5262a0](https://github.com/factorial-io/grantry/commit/a5262a03d0f8b8f81ee4be29e9323f00a25efb4f))
+
 ## [0.4.0](https://github.com/factorial-io/grantry/compare/v0.3.1...v0.4.0) (2026-11-08)
 
 
