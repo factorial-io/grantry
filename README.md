@@ -109,7 +109,7 @@ match server.poll_device(&device_code, client_id, None).await {
 
 User codes use 20 consonants with no vowels and no digits, are typed without regard to case or dashes, and live 10 minutes. A poll faster than the interval answers `slow_down` and raises the interval by 5 seconds. An approval is redeemed once, through `Subjects::recheck`, so a user removed after approving gets no tokens.
 
-With the `axum` feature, `grantry::routes::router(server, routes)` mounts the metadata, authorize, token and register endpoints. Your consent page still calls `approve` and `deny`. Layer rate limiting on top of the router.
+With the `axum` feature, `grantry::routes::router(server, routes)` mounts the metadata, authorize, token and register endpoints. Your consent page still calls `approve` and `deny`. Layer rate limiting on top of the router, or on one endpoint: `routes::endpoints(server, routes)` returns each endpoint as a `MethodRouter` to layer before `Endpoints::router()` mounts them.
 
 ## Provenance
 

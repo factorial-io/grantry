@@ -13,12 +13,13 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use axum::response::Response;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Duration;
 use grantry::client::{FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::metadata::AuthorizationServerMetadata;
-use grantry::routes::{Routes, router};
+use grantry::routes::{Routes, endpoints, router};
 use grantry::store::{BackendError, Grant, NoEvents};
 use grantry::{Config, Recheck, ScopeSpec, Server, Signer, Subjects};
 use http_body_util::BodyExt;
@@ -26,6 +27,7 @@ use jsonwebtoken::Algorithm;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
+use tower::util::MapResponseLayer;
 use url::Url;
 
 const ISSUER: &str = "https://app.example";
@@ -74,9 +76,12 @@ fn server() -> Server<String> {
 }
 
 fn app(server: Server<String>) -> Router {
+    router(server.clone(), routes(&server))
+}
+
+fn routes(server: &Server<String>) -> Routes {
     let scopes = server.config.scopes.known.clone();
-    router(
-        server,
+    {
         Routes {
             metadata: AuthorizationServerMetadata::new(
                 ISSUER,
@@ -90,8 +95,35 @@ fn app(server: Server<String>) -> Router {
             register_path: Some("/oauth/register".into()),
             consent_url: Arc::new(|id| format!("/consent/{id}")),
             other_grant: None,
-        },
-    )
+        }
+    }
+}
+
+/// Issue #36: a layer on one endpoint leaves the others alone.
+#[tokio::test]
+async fn a_layer_on_one_endpoint() {
+    let server = server();
+    let mut endpoints = endpoints(server.clone(), routes(&server));
+    endpoints.register = endpoints.register.map(|(path, register)| {
+        let limited = register.layer(MapResponseLayer::new(|mut r: Response| {
+            *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+            r
+        }));
+        (path, limited)
+    });
+    let app = endpoints.router();
+
+    let register = Request::post("/oauth/register")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"redirect_uris": [CALLBACK]}).to_string()))
+        .unwrap();
+    assert_eq!(call(&app, register).await.0, StatusCode::TOO_MANY_REQUESTS);
+    let token = form("/oauth/token", &[("grant_type", "authorization_code")]);
+    assert_eq!(call(&app, token).await.0, StatusCode::BAD_REQUEST);
+    let meta = Request::get("/.well-known/oauth-authorization-server")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(call(&app, meta).await.0, StatusCode::OK);
 }
 
 async fn call(app: &Router, req: Request<Body>) -> (StatusCode, String, Value) {
