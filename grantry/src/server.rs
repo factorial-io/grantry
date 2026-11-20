@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use url::Url;
@@ -45,11 +45,11 @@ pub struct Config {
     /// Access token lifetime, in seconds.
     pub access_token_secs: u64,
     /// How long an authorization code may be exchanged.
-    pub code_ttl: Duration,
+    pub code_ttl: SignedDuration,
     /// How long a pending authorization waits for consent.
-    pub pending_ttl: Duration,
+    pub pending_ttl: SignedDuration,
     /// A grant's absolute lifetime; no refresh extends it.
-    pub grant_lifetime: Duration,
+    pub grant_lifetime: SignedDuration,
     pub documents: DocumentPolicy,
 }
 
@@ -71,9 +71,9 @@ impl Config {
             scopes,
             signer,
             access_token_secs: 900,
-            code_ttl: Duration::seconds(60),
-            pending_ttl: Duration::minutes(10),
-            grant_lifetime: Duration::days(90),
+            code_ttl: SignedDuration::from_secs(60),
+            pending_ttl: SignedDuration::from_mins(10),
+            grant_lifetime: SignedDuration::from_hours(24 * 90),
             documents: DocumentPolicy::default(),
         }
     }
@@ -88,7 +88,7 @@ pub struct Server<S> {
     events: Arc<dyn Events<S>>,
     fetcher: Arc<dyn MetadataFetcher>,
     tokens: Arc<dyn TokenFormat>,
-    refresh_idle: Option<Duration>,
+    refresh_idle: Option<SignedDuration>,
 }
 
 impl<S> Clone for Server<S> {
@@ -209,7 +209,7 @@ impl RegistrationResponse {
     fn new(client: RegisteredClient, registration: Registration) -> Self {
         Self {
             client_id: client.id,
-            client_id_issued_at: client.created_at.timestamp(),
+            client_id_issued_at: client.created_at.as_second(),
             client_name: client.name,
             redirect_uris: registration.redirect_uris,
             grant_types: registration.grant_types,
@@ -284,7 +284,11 @@ pub struct StartedDevice<S> {
 impl<S> StartedDevice<S> {
     /// `expires_in`, in seconds.
     pub fn expires_in(&self) -> i64 {
-        (self.device.expires_at - self.device.created_at).num_seconds()
+        (self
+            .device
+            .expires_at
+            .duration_since(self.device.created_at))
+        .as_secs()
     }
 }
 
@@ -373,7 +377,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
     /// holder stops using it. Without this, only the grant's absolute
     /// lifetime ends it.
     #[must_use]
-    pub fn with_refresh_idle(mut self, idle: Duration) -> Self {
+    pub fn with_refresh_idle(mut self, idle: SignedDuration) -> Self {
         self.refresh_idle = Some(idle);
         self
     }
@@ -431,7 +435,8 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         let (document, ttl) =
             client::fetch_document(self.fetcher.as_ref(), url, &self.config.documents).await?;
         if !ttl.is_zero() {
-            let expires = Utc::now() + Duration::from_std(ttl).unwrap_or_else(|_| Duration::zero());
+            let expires =
+                Timestamp::now() + SignedDuration::try_from(ttl).unwrap_or(SignedDuration::ZERO);
             self.store
                 .store_document(url.as_str(), document.clone(), expires)
                 .await
@@ -612,7 +617,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         let bound = row.client_id == client_id
             && row.redirect_uri == *redirect_uri
             && form.get("resource").is_none_or(|r| *r == row.resource)
-            && row.expires_at > Utc::now()
+            && row.expires_at > Timestamp::now()
             && crate::pkce::pkce_matches(verifier, &row.code_challenge);
         if !bound {
             return Err(TokenError::InvalidGrant);
@@ -628,7 +633,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             self.revoke(&grant, reason::CODE_REUSE, client_ip).await?;
             return Err(TokenError::InvalidGrant);
         }
-        if !grant.is_active(Utc::now()) {
+        if !grant.is_active(Timestamp::now()) {
             return Err(TokenError::InvalidGrant);
         }
         self.tokens_for(&grant, client_ip).await
@@ -662,7 +667,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                 .await?;
             return Err(TokenError::InvalidGrant);
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
         // Idle expiry after the reuse check, as with the grant's own: a
         // stolen token presented late is still worth revoking the grant for.
         let idle_over = self
@@ -737,7 +742,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
                 device_code_hash: hash_token(&device_code),
                 user_code: device::generate_user_code(),
                 interval_seconds: POLL_INTERVAL,
-                ttl: Duration::seconds(DEVICE_TTL_SECS),
+                ttl: SignedDuration::from_secs(DEVICE_TTL_SECS),
             };
             if let Some(device) = self.store.insert_device(new).await? {
                 return Ok(StartedDevice {
@@ -761,7 +766,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             return Ok(None);
         };
         let found = self.store.device_by_user_code(&code, subject).await?;
-        Ok(found.filter(|d| device::decidable(d, Utc::now())))
+        Ok(found.filter(|d| device::decidable(d, Timestamp::now())))
     }
 
     /// Approve the device authorization for `user_code` as `subject`; the
@@ -814,7 +819,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             .await?
             .filter(|d| d.client_id == client_id)
             .ok_or(TokenError::InvalidGrant)?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         match device::judge_poll(&found, now) {
             Poll::Pending => {
                 self.store
@@ -907,7 +912,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         };
         token::mint(
             &self.config.signer,
-            Utc::now(),
+            Timestamp::now(),
             self.config.access_token_secs,
             &claims,
             extra,
@@ -1010,7 +1015,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
             return Err(ActiveError::Inactive);
         };
         match self.store.find_grant(id).await {
-            Ok(Some(grant)) if grant.is_active(Utc::now()) => Ok((grant, claims)),
+            Ok(Some(grant)) if grant.is_active(Timestamp::now()) => Ok((grant, claims)),
             Ok(_) => Err(ActiveError::Inactive),
             Err(e) => Err(ActiveError::Backend(e)),
         }

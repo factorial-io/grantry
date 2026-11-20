@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ pub use crate::store::UNUSED_CLIENT_DAYS;
 
 struct Inner<S> {
     clients: HashMap<String, RegisteredClient>,
-    documents: HashMap<String, (Value, DateTime<Utc>)>,
+    documents: HashMap<String, (Value, Timestamp)>,
     pending: HashMap<Uuid, Pending<S>>,
     grants: HashMap<Uuid, Grant<S>>,
     /// By hash.
@@ -38,7 +38,7 @@ struct Inner<S> {
     /// once they had a grant.
     swept_clients: HashSet<String>,
     /// When each registered client was last returned by `use_client`.
-    used_at: HashMap<String, DateTime<Utc>>,
+    used_at: HashMap<String, Timestamp>,
 }
 
 impl<S> Inner<S> {
@@ -47,7 +47,7 @@ impl<S> Inner<S> {
     }
 }
 
-fn new_grant<S>(new: NewGrant<S>, now: DateTime<Utc>) -> Grant<S> {
+fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
     Grant {
         id: Uuid::new_v4(),
         subject: new.subject,
@@ -93,7 +93,7 @@ impl<S> MemoryStore<S> {
 
     /// Move every expiry and lifetime `by` into the past, as if that much
     /// time went by. For tests of expiry.
-    pub fn age(&self, by: Duration) {
+    pub fn age(&self, by: SignedDuration) {
         let mut inner = self.lock();
         for p in inner.pending.values_mut() {
             p.expires_at -= by;
@@ -137,7 +137,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             id: id.clone(),
             name,
             redirect_uris: redirect_uris.to_vec(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         self.lock().clients.insert(id, client.clone());
         Ok(client)
@@ -147,13 +147,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         let mut inner = self.lock();
         let client = inner.clients.get(id).cloned();
         if client.is_some() {
-            inner.used_at.insert(id.to_string(), Utc::now());
+            inner.used_at.insert(id.to_string(), Timestamp::now());
         }
         Ok(client)
     }
 
     async fn cached_document(&self, url: &str) -> Result<Option<Value>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(self
             .lock()
             .documents
@@ -166,7 +166,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         &self,
         url: &str,
         document: Value,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Result<(), BackendError> {
         self.lock()
             .documents
@@ -175,7 +175,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     }
 
     async fn insert_pending(&self, new: NewPending) -> Result<Pending<S>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let pending = Pending {
             id: Uuid::new_v4(),
             client_id: new.client_id,
@@ -199,7 +199,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         id: Uuid,
         subject: &S,
     ) -> Result<Option<Pending<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let Some(row) = inner.pending.get_mut(&id).filter(|p| p.expires_at > now) else {
             return Ok(None);
@@ -215,7 +215,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         id: Uuid,
         subject: &S,
     ) -> Result<Option<Pending<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let Some(row) = inner.pending.get_mut(&id).filter(|p| p.expires_at > now) else {
             return Ok(None);
@@ -233,11 +233,11 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         &self,
         approved: &Pending<S>,
         subject: &S,
-        lifetime: Duration,
+        lifetime: SignedDuration,
         code_hash: String,
-        code_ttl: Duration,
+        code_ttl: SignedDuration,
     ) -> Result<Grant<S>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let grant = Grant {
             id: Uuid::new_v4(),
             subject: subject.clone(),
@@ -268,13 +268,13 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     }
 
     async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
-        let grant = new_grant(new, Utc::now());
+        let grant = new_grant(new, Timestamp::now());
         self.lock().grants.insert(grant.id, grant.clone());
         Ok(grant)
     }
 
     async fn insert_device(&self, new: NewDevice) -> Result<Option<Device<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         if inner
             .devices
@@ -309,7 +309,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         user_code: &str,
         _subject: &S,
     ) -> Result<Option<Device<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(self
             .lock()
             .devices
@@ -324,7 +324,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         subject: &S,
         approve: bool,
     ) -> Result<bool, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let Some(d) = inner
             .device_mut(id)
@@ -344,7 +344,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     async fn record_poll(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         interval_seconds: u32,
     ) -> Result<(), BackendError> {
         if let Some(d) = self.lock().device_mut(id) {
@@ -359,7 +359,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         id: Uuid,
         grant: NewGrant<S>,
     ) -> Result<Option<Grant<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let Some(d) = inner
             .device_mut(id)
@@ -386,7 +386,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         else {
             return Ok(false);
         };
-        code.used_at = Some(Utc::now());
+        code.used_at = Some(Timestamp::now());
         Ok(true)
     }
 
@@ -399,7 +399,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         let Some(grant) = inner.grants.get_mut(&id).filter(|g| g.revoked_at.is_none()) else {
             return Ok(false);
         };
-        grant.revoked_at = Some(Utc::now());
+        grant.revoked_at = Some(Timestamp::now());
         grant.revoke_reason = Some(reason.to_string());
         Ok(true)
     }
@@ -414,7 +414,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             RefreshToken {
                 id: Uuid::new_v4(),
                 grant_id: grant.id,
-                issued_at: Utc::now(),
+                issued_at: Timestamp::now(),
                 rotated_at: None,
             },
         );
@@ -434,7 +434,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         grant: &Grant<S>,
         new_hash: String,
     ) -> Result<bool, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let Some(token) = inner
             .refresh
@@ -460,7 +460,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     }
 
     async fn sweep(&self) -> Result<u64, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let count = |i: &Inner<S>| {
             i.pending.len()
@@ -472,7 +472,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
                 + i.refresh.len()
         };
         let before = count(&inner);
-        let ended = now - Duration::days(GRANT_RETENTION_DAYS);
+        let ended = now - SignedDuration::from_hours(24 * GRANT_RETENTION_DAYS);
         let Inner {
             grants,
             codes,
@@ -500,7 +500,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             .chain(&inner.swept_clients)
             .cloned()
             .collect();
-        let cutoff = now - Duration::days(UNUSED_CLIENT_DAYS);
+        let cutoff = now - SignedDuration::from_hours(24 * UNUSED_CLIENT_DAYS);
         let Inner {
             clients, used_at, ..
         } = &mut *inner;
@@ -528,7 +528,7 @@ mod tests {
             state: None,
             code_challenge: "x".into(),
             resource: "r".into(),
-            ttl: Duration::seconds(600),
+            ttl: SignedDuration::from_secs(600),
         }
     }
 
@@ -536,7 +536,7 @@ mod tests {
     async fn claim_pending_does_not_bind_an_expired_request() {
         let store = MemoryStore::<String>::default();
         let id = store.insert_pending(request()).await.unwrap().id;
-        store.age(Duration::seconds(601));
+        store.age(SignedDuration::from_secs(601));
         assert!(
             store
                 .claim_pending(id, &"alice".into())
@@ -551,7 +551,7 @@ mod tests {
     async fn take_pending_does_not_bind_an_expired_request() {
         let store = MemoryStore::<String>::default();
         let id = store.insert_pending(request()).await.unwrap().id;
-        store.age(Duration::seconds(601));
+        store.age(SignedDuration::from_secs(601));
         assert!(
             store
                 .take_pending(id, &"alice".into())
@@ -571,7 +571,7 @@ mod tests {
             .insert_client("c".into(), "c".into(), &[])
             .await
             .unwrap();
-        store.age(Duration::days(UNUSED_CLIENT_DAYS + 1));
+        store.age(SignedDuration::from_hours(24 * (UNUSED_CLIENT_DAYS + 1)));
         let alice = "alice".to_string();
 
         // authorize: resolve, sweep, insert_pending.
@@ -586,9 +586,9 @@ mod tests {
             .create_grant_with_code(
                 &row,
                 &alice,
-                Duration::days(1),
+                SignedDuration::from_hours(24),
                 "h".into(),
-                Duration::seconds(60),
+                SignedDuration::from_secs(60),
             )
             .await
             .unwrap();
@@ -600,7 +600,7 @@ mod tests {
             .await
             .unwrap();
         store.use_client("d").await.unwrap();
-        store.age(Duration::days(UNUSED_CLIENT_DAYS + 1));
+        store.age(SignedDuration::from_hours(24 * (UNUSED_CLIENT_DAYS + 1)));
         store.sweep().await.unwrap();
         assert!(!store.lock().clients.contains_key("d"));
     }

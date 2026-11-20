@@ -35,12 +35,12 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
 use grantry::device::{Device, DeviceStatus};
 use grantry::store::{
     BackendError, Code, GRANT_RETENTION_DAYS, Grant, NewDevice, NewGrant, NewPending, OAuthStore,
     Pending, RefreshToken, RegisteredClient, UNUSED_CLIENT_DAYS,
 };
+use jiff::{SignedDuration, Timestamp};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 use serde::Serialize;
@@ -257,20 +257,28 @@ impl<S> RedisStore<S> {
     }
 }
 
-fn us(t: DateTime<Utc>) -> String {
-    t.timestamp_micros().to_string()
+fn us(t: Timestamp) -> String {
+    t.as_microsecond().to_string()
 }
 
-fn ms(t: DateTime<Utc>) -> i64 {
-    t.timestamp_millis()
+fn ms(t: Timestamp) -> i64 {
+    t.as_millisecond()
 }
 
-fn retention() -> Duration {
-    Duration::days(GRANT_RETENTION_DAYS)
+fn retention() -> SignedDuration {
+    SignedDuration::from_hours(24 * GRANT_RETENTION_DAYS)
 }
 
 fn unused_client_ms() -> i64 {
-    Duration::days(UNUSED_CLIENT_DAYS).num_milliseconds()
+    millis(SignedDuration::from_hours(24 * UNUSED_CLIENT_DAYS))
+}
+
+fn millis(d: SignedDuration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn micros(d: SignedDuration) -> i64 {
+    i64::try_from(d.as_micros()).unwrap_or(i64::MAX)
 }
 
 fn json<T: Serialize>(value: &T) -> Result<String, BackendError> {
@@ -310,11 +318,11 @@ impl Row {
         Ok(self.get(field)?.parse()?)
     }
 
-    fn time(&self, field: &str) -> Result<DateTime<Utc>, BackendError> {
+    fn time(&self, field: &str) -> Result<Timestamp, BackendError> {
         parse_time(self.get(field)?)
     }
 
-    fn opt_time(&self, field: &str) -> Result<Option<DateTime<Utc>>, BackendError> {
+    fn opt_time(&self, field: &str) -> Result<Option<Timestamp>, BackendError> {
         self.map.get(field).map(|v| parse_time(v)).transpose()
     }
 
@@ -331,8 +339,9 @@ impl Row {
     }
 }
 
-fn parse_time(v: &str) -> Result<DateTime<Utc>, BackendError> {
-    DateTime::from_timestamp_micros(v.parse()?)
+fn parse_time(v: &str) -> Result<Timestamp, BackendError> {
+    Timestamp::from_microsecond(v.parse()?)
+        .ok()
         .ok_or_else(|| format!("grantry-redis: timestamp out of range: {v}").into())
 }
 
@@ -418,7 +427,7 @@ fn grant_keep_ms<S>(g: &Grant<S>) -> i64 {
     ms(g.expires_at + retention())
 }
 
-fn new_grant<S>(new: NewGrant<S>, now: DateTime<Utc>) -> Grant<S> {
+fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
     Grant {
         id: Uuid::new_v4(),
         subject: new.subject,
@@ -489,7 +498,7 @@ where
             id,
             name,
             redirect_uris: redirect_uris.to_vec(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         };
         let key = self.key("client", &client.id);
         let fields = [
@@ -532,7 +541,7 @@ where
         &self,
         url: &str,
         document: Value,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Result<(), BackendError> {
         let key = self.key("doc", url);
         // PEXPIREAT in the past deletes the key, like an expired row.
@@ -548,7 +557,7 @@ where
     }
 
     async fn insert_pending(&self, new: NewPending) -> Result<Pending<S>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let pending = Pending {
             id: Uuid::new_v4(),
             client_id: new.client_id,
@@ -613,11 +622,11 @@ where
         &self,
         approved: &Pending<S>,
         subject: &S,
-        lifetime: Duration,
+        lifetime: SignedDuration,
         code_hash: String,
-        code_ttl: Duration,
+        code_ttl: SignedDuration,
     ) -> Result<Grant<S>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let grant = Grant {
             id: Uuid::new_v4(),
             subject: subject.clone(),
@@ -682,7 +691,7 @@ where
             .use_code
             .key(self.key("code-id", id))
             .arg(&self.prefix)
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .invoke_async(&mut self.conn())
             .await?;
         Ok(done == 1)
@@ -696,7 +705,7 @@ where
     }
 
     async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
-        let grant = new_grant(new, Utc::now());
+        let grant = new_grant(new, Timestamp::now());
         let key = self.key("grant", grant.id);
         redis::pipe()
             .atomic()
@@ -712,7 +721,7 @@ where
     }
 
     async fn insert_device(&self, new: NewDevice) -> Result<Option<Device<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let device = Device {
             id: Uuid::new_v4(),
             client_id: new.client_id,
@@ -737,7 +746,7 @@ where
             ("created_at", us(now)),
             ("expires_at", us(device.expires_at)),
         ];
-        let keep = device.expires_at + Duration::hours(EXPIRED_DEVICE_KEEP_HOURS);
+        let keep = device.expires_at + SignedDuration::from_hours(EXPIRED_DEVICE_KEEP_HOURS);
         let inserted: i64 = self
             .scripts
             .insert_device
@@ -772,7 +781,7 @@ where
         };
         let device = self.find_device(&hash).await?;
         // The index expires to the millisecond; the row knows the microsecond.
-        Ok(device.filter(|d| d.expires_at > Utc::now()))
+        Ok(device.filter(|d| d.expires_at > Timestamp::now()))
     }
 
     async fn decide_device(
@@ -791,7 +800,7 @@ where
             .decide
             .key(self.key("device-id", id))
             .arg(&self.prefix)
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .arg(status_str(status))
             .arg(json(subject)?)
             .invoke_async(&mut self.conn())
@@ -802,7 +811,7 @@ where
     async fn record_poll(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         interval_seconds: u32,
     ) -> Result<(), BackendError> {
         let _: i64 = self
@@ -822,7 +831,7 @@ where
         id: Uuid,
         grant: NewGrant<S>,
     ) -> Result<Option<Grant<S>>, BackendError> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let grant = new_grant(grant, now);
         let done: i64 = self
             .scripts
@@ -845,9 +854,9 @@ where
             .revoke
             .key(self.key("grant", id))
             .key(self.grant_set(id))
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .arg(reason)
-            .arg(retention().num_microseconds().unwrap_or(i64::MAX))
+            .arg(micros(retention()))
             .invoke_async(&mut self.conn())
             .await?;
         Ok(done == 1)
@@ -868,9 +877,9 @@ where
             .key(self.key("refresh-id", id))
             .arg(id.to_string())
             .arg(grant.id.to_string())
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .arg(&token_hash)
-            .arg(retention().num_milliseconds())
+            .arg(millis(retention()))
             .invoke_async(&mut self.conn())
             .await?;
         Ok(())
@@ -902,11 +911,11 @@ where
             .key(self.key("refresh", &new_hash))
             .key(self.key("refresh-id", id))
             .arg(&self.prefix)
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .arg(id.to_string())
             .arg(grant.id.to_string())
             .arg(&new_hash)
-            .arg(retention().num_milliseconds())
+            .arg(millis(retention()))
             .invoke_async(&mut self.conn())
             .await?;
         Ok(done == 1)
@@ -934,7 +943,7 @@ where
             .claim
             .key(&key)
             .arg(json(subject)?)
-            .arg(us(Utc::now()))
+            .arg(us(Timestamp::now()))
             .arg(if take { "1" } else { "0" })
             .invoke_async(&mut self.conn())
             .await?;
