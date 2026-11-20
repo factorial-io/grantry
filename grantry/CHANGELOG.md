@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/factorial-io/grantry/compare/v0.5.0...v0.6.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* public time types are now jiff::Timestamp and
+
+### Features
+
+* replace chrono with jiff in the public API ([a9d5012](https://github.com/factorial-io/grantry/commit/a9d5012fb7a5b8131a39f2a901154521dadba984)), closes [#45](https://github.com/factorial-io/grantry/issues/45)
+
 ## [0.5.0](https://github.com/factorial-io/grantry/compare/v0.4.0...v0.5.0) (2026-11-09)
 
 
