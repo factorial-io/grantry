@@ -28,7 +28,7 @@
 
 use std::fmt::Debug;
 
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -39,7 +39,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
 }
 
-fn pending(client_id: &str, ttl: Duration) -> NewPending {
+fn pending(client_id: &str, ttl: SignedDuration) -> NewPending {
     NewPending {
         client_id: client_id.into(),
         client_name: "Conformance".into(),
@@ -53,7 +53,7 @@ fn pending(client_id: &str, ttl: Duration) -> NewPending {
     }
 }
 
-fn new_grant<S>(subject: S, lifetime: Duration) -> NewGrant<S> {
+fn new_grant<S>(subject: S, lifetime: SignedDuration) -> NewGrant<S> {
     NewGrant {
         subject,
         client_id: unique("client"),
@@ -63,7 +63,7 @@ fn new_grant<S>(subject: S, lifetime: Duration) -> NewGrant<S> {
     }
 }
 
-fn device(user_code: &str, ttl: Duration) -> NewDevice {
+fn device(user_code: &str, ttl: SignedDuration) -> NewDevice {
     NewDevice {
         client_id: "conformance-cli".into(),
         client_name: "Conformance CLI".into(),
@@ -104,7 +104,7 @@ where
     St::Subject: Debug,
 {
     assert_ne!(alice, bob, "check_core needs two different subjects");
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     // Clients.
     let client_id = unique("client");
@@ -137,7 +137,7 @@ where
     let doc = json!({"client_id": url, "redirect_uris": ["https://client.example/cb"]});
     assert!(store.cached_document(&url).await.expect("cached").is_none());
     store
-        .store_document(&url, doc.clone(), now + Duration::hours(1))
+        .store_document(&url, doc.clone(), now + SignedDuration::from_hours(1))
         .await
         .expect("store_document");
     assert_eq!(
@@ -145,7 +145,7 @@ where
         Some(doc.clone())
     );
     store
-        .store_document(&url, doc, now - Duration::seconds(1))
+        .store_document(&url, doc, now - SignedDuration::from_secs(1))
         .await
         .expect("store_document");
     assert!(
@@ -155,11 +155,14 @@ where
 
     // Pending authorizations: binding and single use.
     let p = store
-        .insert_pending(pending(&client_id, Duration::minutes(10)))
+        .insert_pending(pending(&client_id, SignedDuration::from_mins(10)))
         .await
         .expect("insert_pending");
     assert_eq!(p.subject, None);
-    assert_eq!(p.expires_at - p.created_at, Duration::minutes(10));
+    assert_eq!(
+        p.expires_at.duration_since(p.created_at),
+        SignedDuration::from_mins(10)
+    );
     let claimed = store
         .claim_pending(p.id, &alice)
         .await
@@ -216,7 +219,7 @@ where
 
     // An unbound request can be taken directly, once, under a race.
     let p = store
-        .insert_pending(pending(&client_id, Duration::minutes(10)))
+        .insert_pending(pending(&client_id, SignedDuration::from_mins(10)))
         .await
         .expect("insert_pending");
     let (a, b) = tokio::join!(
@@ -230,7 +233,7 @@ where
 
     // Two subjects racing to bind: one wins.
     let p = store
-        .insert_pending(pending(&client_id, Duration::minutes(10)))
+        .insert_pending(pending(&client_id, SignedDuration::from_mins(10)))
         .await
         .expect("insert_pending");
     let (a, b) = tokio::join!(
@@ -244,7 +247,7 @@ where
 
     // Expired requests are neither claimed nor taken.
     let expired = store
-        .insert_pending(pending(&client_id, Duration::seconds(-1)))
+        .insert_pending(pending(&client_id, SignedDuration::from_secs(-1)))
         .await
         .expect("insert_pending");
     assert!(
@@ -264,7 +267,7 @@ where
 
     // A grant and its code.
     let p = store
-        .insert_pending(pending(&client_id, Duration::minutes(10)))
+        .insert_pending(pending(&client_id, SignedDuration::from_mins(10)))
         .await
         .expect("insert_pending");
     let approved = store
@@ -277,9 +280,9 @@ where
         .create_grant_with_code(
             &approved,
             &alice,
-            Duration::days(90),
+            SignedDuration::from_hours(24 * 90),
             code_hash.clone(),
-            Duration::minutes(1),
+            SignedDuration::from_mins(1),
         )
         .await
         .expect("create_grant_with_code");
@@ -289,7 +292,7 @@ where
         (client_id.as_str(), "read offline_access")
     );
     assert_eq!(grant.redirect_uri, approved.redirect_uri);
-    assert!(grant.is_active(Utc::now()));
+    assert!(grant.is_active(Timestamp::now()));
     let found = store
         .find_grant(grant.id)
         .await
@@ -316,7 +319,7 @@ where
     assert_eq!(code.code_challenge, approved.code_challenge);
     assert_eq!(code.resource, approved.resource);
     assert_eq!(code.redirect_uri, approved.redirect_uri);
-    assert!(code.expires_at > Utc::now() && code.used_at.is_none());
+    assert!(code.expires_at > Timestamp::now() && code.used_at.is_none());
     assert!(
         store
             .find_code(&unique("code"))
@@ -396,7 +399,7 @@ where
         .expect("a revoked grant is kept");
     assert!(revoked.revoked_at.is_some());
     assert_eq!(revoked.revoke_reason.as_deref(), Some("conformance"));
-    assert!(!revoked.is_active(Utc::now()));
+    assert!(!revoked.is_active(Timestamp::now()));
     assert!(
         !store
             .revoke_grant(Uuid::new_v4(), "conformance")
@@ -422,7 +425,7 @@ where
     St: OAuthStore,
     St::Subject: Debug,
 {
-    let new = new_grant(subject.clone(), Duration::days(30));
+    let new = new_grant(subject.clone(), SignedDuration::from_hours(24 * 30));
     let client_id = new.client_id.clone();
     let grant = store.create_grant(new).await.expect("create_grant");
     assert_eq!(grant.subject, subject);
@@ -434,7 +437,10 @@ where
         ),
         (client_id.as_str(), "read", "")
     );
-    assert_eq!(grant.expires_at - grant.created_at, Duration::days(30));
+    assert_eq!(
+        grant.expires_at.duration_since(grant.created_at),
+        SignedDuration::from_hours(24 * 30)
+    );
     let found = store
         .find_grant(grant.id)
         .await
@@ -464,7 +470,7 @@ where
     St::Subject: Debug,
 {
     let code = user_code();
-    let new = device(&code, Duration::minutes(10));
+    let new = device(&code, SignedDuration::from_mins(10));
     let hash = new.device_code_hash.clone();
     let d = store
         .insert_device(new)
@@ -476,10 +482,13 @@ where
         (d.user_code.as_str(), d.interval_seconds, d.subject.as_ref()),
         (code.as_str(), 5, None)
     );
-    assert_eq!(d.expires_at - d.created_at, Duration::minutes(10));
+    assert_eq!(
+        d.expires_at.duration_since(d.created_at),
+        SignedDuration::from_mins(10)
+    );
     assert!(
         store
-            .insert_device(device(&code, Duration::minutes(10)))
+            .insert_device(device(&code, SignedDuration::from_mins(10)))
             .await
             .expect("insert_device")
             .is_none(),
@@ -489,8 +498,8 @@ where
     // Two inserts racing for a fresh user code: one wins.
     let raced = user_code();
     let (a, b) = tokio::join!(
-        store.insert_device(device(&raced, Duration::minutes(10))),
-        store.insert_device(device(&raced, Duration::minutes(10))),
+        store.insert_device(device(&raced, SignedDuration::from_mins(10))),
+        store.insert_device(device(&raced, SignedDuration::from_mins(10))),
     );
     exactly_one(
         [
@@ -523,7 +532,10 @@ where
     // Nothing to redeem before approval.
     assert!(
         store
-            .redeem_device(d.id, new_grant(subject.clone(), Duration::days(1)))
+            .redeem_device(
+                d.id,
+                new_grant(subject.clone(), SignedDuration::from_hours(24))
+            )
             .await
             .expect("redeem")
             .is_none()
@@ -548,7 +560,7 @@ where
             .expect("decide")
     );
 
-    let at = Utc::now();
+    let at = Timestamp::now();
     store.record_poll(d.id, at, 10).await.expect("record_poll");
     let polled = store
         .find_device(&hash)
@@ -558,15 +570,21 @@ where
     assert_eq!(polled.interval_seconds, 10);
     let last = polled.last_polled_at.expect("the poll is recorded");
     assert!(
-        last <= at && at - last < Duration::seconds(1),
+        last <= at && at.duration_since(last) < SignedDuration::from_secs(1),
         "a poll time is kept, truncated at most to whole seconds, never rounded up"
     );
 
     if approved {
         assert_eq!(decided.status, DeviceStatus::Approved);
         let (a, b) = tokio::join!(
-            store.redeem_device(d.id, new_grant(subject.clone(), Duration::days(1))),
-            store.redeem_device(d.id, new_grant(subject.clone(), Duration::days(1))),
+            store.redeem_device(
+                d.id,
+                new_grant(subject.clone(), SignedDuration::from_hours(24))
+            ),
+            store.redeem_device(
+                d.id,
+                new_grant(subject.clone(), SignedDuration::from_hours(24))
+            ),
         );
         let (a, b) = (a.expect("redeem"), b.expect("redeem"));
         exactly_one([a.is_some(), b.is_some()], "redeem_device");
@@ -589,7 +607,10 @@ where
         assert_eq!(decided.status, DeviceStatus::Denied);
         assert!(
             store
-                .redeem_device(d.id, new_grant(subject.clone(), Duration::days(1)))
+                .redeem_device(
+                    d.id,
+                    new_grant(subject.clone(), SignedDuration::from_hours(24))
+                )
                 .await
                 .expect("redeem")
                 .is_none()
@@ -599,7 +620,7 @@ where
     // An expired authorization frees its user code and is not decided.
     let stale = user_code();
     let expired = store
-        .insert_device(device(&stale, Duration::seconds(-1)))
+        .insert_device(device(&stale, SignedDuration::from_secs(-1)))
         .await
         .expect("insert_device")
         .expect("inserted");
@@ -618,7 +639,7 @@ where
     );
     assert!(
         store
-            .insert_device(device(&stale, Duration::minutes(10)))
+            .insert_device(device(&stale, SignedDuration::from_mins(10)))
             .await
             .expect("insert_device")
             .is_some(),

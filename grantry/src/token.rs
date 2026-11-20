@@ -11,7 +11,7 @@
 //! and algorithm come from the app.
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -126,12 +126,12 @@ pub struct AccessClaims<'a> {
 /// name.
 pub fn mint(
     signer: &Signer,
-    now: DateTime<Utc>,
+    now: Timestamp,
     lifetime_secs: u64,
     claims: &AccessClaims<'_>,
     extra: Map<String, Value>,
 ) -> Result<String, jsonwebtoken::errors::Error> {
-    let exp = u64::try_from(now.timestamp())
+    let exp = u64::try_from(now.as_second())
         .unwrap_or(0)
         .saturating_add(lifetime_secs);
     let mut all = extra;
@@ -329,7 +329,7 @@ mod tests {
     /// from fixed inputs.
     #[test]
     fn golden_claims() {
-        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = Timestamp::from_second(1_800_000_000).unwrap();
         let extra = json!({
             "pid": "5f0e8a52-0000-4000-8000-000000000002",
             "tenant_id": "0b7c1d2e-0000-4000-8000-000000000003",
@@ -367,7 +367,7 @@ mod tests {
         let extra = json!({"aud": "https://evil.example", "kind": "session"});
         let token = mint(
             &signer(),
-            Utc::now(),
+            Timestamp::now(),
             60,
             &claims(),
             extra.as_object().unwrap().clone(),
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn only_a_token_of_this_kind_for_this_resource_verifies() {
-        let ok = mint(&signer(), Utc::now(), 60, &claims(), Map::new()).unwrap();
+        let ok = mint(&signer(), Timestamp::now(), 60, &claims(), Map::new()).unwrap();
         assert!(verify(&signer(), &ok, RESOURCE, "mcp").is_ok());
         assert!(matches!(
             verify(&signer(), &ok, "https://other.example/mcp", "mcp"),
@@ -398,7 +398,7 @@ mod tests {
 
         let expired = mint(
             &signer(),
-            Utc::now() - chrono::Duration::seconds(120),
+            Timestamp::now() - jiff::SignedDuration::from_secs(120),
             60,
             &claims(),
             Map::new(),
@@ -433,7 +433,7 @@ mod tests {
         });
         let fresh = mint(
             &raw,
-            Utc::now(),
+            Timestamp::now(),
             900,
             &claims(),
             extra.as_object().unwrap().clone(),
@@ -472,7 +472,7 @@ mod tests {
         const KNOWN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2Zsb3dkcm9wLmV4YW1wbGUvbWNwIiwiY2xpZW50X2lkIjoiY2xpZW50LTEiLCJleHAiOjQwMDAwMDA5MDAsImdyYW50X2lkIjoiNmQxYzRhNWUtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxIiwia2luZCI6Im1jcCIsInNjb3BlIjoicmVhZCBydW4gb2ZmbGluZV9hY2Nlc3MifQ.XDdCjL5b4ASk17C4toRVn1O76zcTAEj6LYaOdTtRbXU";
         let raw = Signer::hmac(Algorithm::HS256, b"a-plain-string-secret");
         // Far enough ahead that the token has not expired when the test runs.
-        let now = DateTime::from_timestamp(4_000_000_000, 0).unwrap();
+        let now = Timestamp::from_second(4_000_000_000).unwrap();
         let token = mint(&raw, now, 900, &claims(), Map::new()).unwrap();
         assert_eq!(token, KNOWN);
         assert!(verify(&raw, KNOWN, RESOURCE, "mcp").is_ok());
@@ -484,8 +484,8 @@ mod tests {
     fn non_hmac_algorithms_fail_cleanly() {
         for alg in [Algorithm::RS256, Algorithm::ES256, Algorithm::EdDSA] {
             let s = Signer::hmac(alg, b"a-plain-string-secret");
-            assert!(mint(&s, Utc::now(), 60, &claims(), Map::new()).is_err());
-            let hs = mint(&signer(), Utc::now(), 60, &claims(), Map::new()).unwrap();
+            assert!(mint(&s, Timestamp::now(), 60, &claims(), Map::new()).is_err());
+            let hs = mint(&signer(), Timestamp::now(), 60, &claims(), Map::new()).unwrap();
             assert!(verify(&s, &hs, RESOURCE, "mcp").is_err());
         }
     }

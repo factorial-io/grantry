@@ -9,7 +9,7 @@
 //! user in a tenant. grantry only stores and compares it.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ pub struct RegisteredClient {
     pub id: String,
     pub name: String,
     pub redirect_uris: Vec<String>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// A validated authorization request, before login.
@@ -41,7 +41,7 @@ pub struct NewPending {
     pub state: Option<String>,
     pub code_challenge: String,
     pub resource: String,
-    pub ttl: Duration,
+    pub ttl: SignedDuration,
 }
 
 /// A stored authorization request. `subject` is set by the first
@@ -58,8 +58,8 @@ pub struct Pending<S> {
     pub code_challenge: String,
     pub resource: String,
     pub subject: Option<S>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
 }
 
 /// A grant: one approved connection of one client for one subject.
@@ -72,17 +72,17 @@ pub struct Grant<S> {
     pub client_name: String,
     pub redirect_uri: String,
     pub scope: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// The absolute lifetime: no refresh extends it.
-    pub expires_at: DateTime<Utc>,
-    pub last_refreshed_at: Option<DateTime<Utc>>,
-    pub revoked_at: Option<DateTime<Utc>>,
+    pub expires_at: Timestamp,
+    pub last_refreshed_at: Option<Timestamp>,
+    pub revoked_at: Option<Timestamp>,
     pub revoke_reason: Option<String>,
 }
 
 impl<S> Grant<S> {
     /// Not revoked and not past its absolute lifetime.
-    pub fn is_active(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_active(&self, now: Timestamp) -> bool {
         self.revoked_at.is_none() && self.expires_at > now
     }
 }
@@ -97,7 +97,7 @@ pub struct NewGrant<S> {
     /// The canonical scope string.
     pub scope: String,
     /// The absolute lifetime.
-    pub lifetime: Duration,
+    pub lifetime: SignedDuration,
 }
 
 /// A device authorization to store ([`crate::Server::start_device`]).
@@ -111,7 +111,7 @@ pub struct NewDevice {
     /// `XXXX-XXXX`.
     pub user_code: String,
     pub interval_seconds: u32,
-    pub ttl: Duration,
+    pub ttl: SignedDuration,
 }
 
 /// An authorization code, stored by its hash.
@@ -123,8 +123,8 @@ pub struct Code {
     pub redirect_uri: String,
     pub resource: String,
     pub code_challenge: String,
-    pub expires_at: DateTime<Utc>,
-    pub used_at: Option<DateTime<Utc>>,
+    pub expires_at: Timestamp,
+    pub used_at: Option<Timestamp>,
 }
 
 /// A refresh token, stored by its hash.
@@ -132,9 +132,9 @@ pub struct Code {
 pub struct RefreshToken {
     pub id: Uuid,
     pub grant_id: Uuid,
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: Timestamp,
     /// Set once a successor was issued; presenting it again is reuse.
-    pub rotated_at: Option<DateTime<Utc>>,
+    pub rotated_at: Option<Timestamp>,
 }
 
 /// Storage of the authorization server. Secrets (codes, refresh tokens)
@@ -187,7 +187,7 @@ pub trait OAuthStore: Send + Sync {
         &self,
         url: &str,
         document: Value,
-        expires_at: DateTime<Utc>,
+        expires_at: Timestamp,
     ) -> Result<(), BackendError>;
 
     /// Store a validated request; the store assigns the id and sets
@@ -223,9 +223,9 @@ pub trait OAuthStore: Send + Sync {
         &self,
         approved: &Pending<Self::Subject>,
         subject: &Self::Subject,
-        lifetime: Duration,
+        lifetime: SignedDuration,
         code_hash: String,
-        code_ttl: Duration,
+        code_ttl: SignedDuration,
     ) -> Result<Grant<Self::Subject>, BackendError>;
 
     /// The code with hash `code_hash`, used or not.
@@ -313,7 +313,7 @@ pub trait OAuthStore: Send + Sync {
     async fn record_poll(
         &self,
         id: Uuid,
-        at: DateTime<Utc>,
+        at: Timestamp,
         interval_seconds: u32,
     ) -> Result<(), BackendError> {
         let _ = (id, at, interval_seconds);

@@ -8,9 +8,9 @@
 //! and decides who may see one (a tenant, say).
 //!
 //! Contributed from Fons (`fons-identity::device`), where these rules ran the
-//! `fons-cli` login; ported verbatim with its tests, from `time` to `chrono`.
+//! `fons-cli` login; ported verbatim with its tests, from `time` to `chrono`, then to `jiff`.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use uuid::Uuid;
 
 /// RFC 8628 §6.1: no vowels (no words), no digits (no look-alikes).
@@ -149,17 +149,17 @@ pub struct Device<S> {
     /// The current polling interval in seconds.
     pub interval_seconds: u32,
     /// The previous poll.
-    pub last_polled_at: Option<DateTime<Utc>>,
+    pub last_polled_at: Option<Timestamp>,
     /// Who approved or denied it.
     pub subject: Option<S>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
 }
 
 impl<S> Device<S> {
     /// The state at `now`: a `pending` or `approved` authorization past its
     /// end reads as `expired` whether or not anything has written that yet.
-    pub fn status_at(&self, now: DateTime<Utc>) -> DeviceStatus {
+    pub fn status_at(&self, now: Timestamp) -> DeviceStatus {
         match self.status {
             DeviceStatus::Pending | DeviceStatus::Approved if now >= self.expires_at => {
                 DeviceStatus::Expired
@@ -194,14 +194,14 @@ pub enum Poll {
 /// Final states answer as they are however fast the client polls; only a
 /// pending authorization is subject to `slow_down`, which is a variant of
 /// `authorization_pending` (RFC 8628 §3.5).
-pub fn judge_poll<S>(device: &Device<S>, now: DateTime<Utc>) -> Poll {
+pub fn judge_poll<S>(device: &Device<S>, now: Timestamp) -> Poll {
     match device.status_at(now) {
         DeviceStatus::Expired => Poll::Expired,
         DeviceStatus::Denied => Poll::Denied,
         DeviceStatus::Redeemed => Poll::Redeemed,
         DeviceStatus::Approved => Poll::Redeem,
         DeviceStatus::Pending => {
-            let interval = Duration::seconds(i64::from(device.interval_seconds));
+            let interval = SignedDuration::from_secs(i64::from(device.interval_seconds));
             match device.last_polled_at {
                 Some(last) if now - last < interval => Poll::SlowDown {
                     interval: device.interval_seconds.saturating_add(SLOW_DOWN_STEP),
@@ -214,7 +214,7 @@ pub fn judge_poll<S>(device: &Device<S>, now: DateTime<Utc>) -> Poll {
 
 /// Whether the person may still approve or deny `device` at `now`: only while
 /// it is pending.
-pub fn decidable<S>(device: &Device<S>, now: DateTime<Utc>) -> bool {
+pub fn decidable<S>(device: &Device<S>, now: Timestamp) -> bool {
     device.status_at(now) == DeviceStatus::Pending
 }
 
@@ -222,8 +222,8 @@ pub fn decidable<S>(device: &Device<S>, now: DateTime<Utc>) -> bool {
 mod tests {
     use super::*;
 
-    fn t0() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000, 0).expect("timestamp")
+    fn t0() -> Timestamp {
+        Timestamp::from_second(1_800_000_000).expect("timestamp")
     }
 
     fn pending() -> Device<&'static str> {
@@ -238,7 +238,7 @@ mod tests {
             last_polled_at: None,
             subject: None,
             created_at: t0(),
-            expires_at: t0() + Duration::minutes(10),
+            expires_at: t0() + SignedDuration::from_mins(10),
         }
     }
 
@@ -314,13 +314,13 @@ mod tests {
     #[test]
     fn expiry() {
         let device = pending();
-        let ten = t0() + Duration::minutes(10);
+        let ten = t0() + SignedDuration::from_mins(10);
         assert_eq!(
-            judge_poll(&device, ten - Duration::seconds(1)),
+            judge_poll(&device, ten - SignedDuration::from_secs(1)),
             Poll::Pending
         );
         assert_eq!(judge_poll(&device, ten), Poll::Expired);
-        assert!(decidable(&device, ten - Duration::seconds(1)));
+        assert!(decidable(&device, ten - SignedDuration::from_secs(1)));
         assert!(!decidable(&device, ten), "approving it fails");
 
         let approved = Device {
@@ -352,7 +352,7 @@ mod tests {
         };
         assert_eq!(judge_poll(&redeemed, t0()), Poll::Redeemed);
         assert_eq!(
-            judge_poll(&redeemed, t0() + Duration::hours(1)),
+            judge_poll(&redeemed, t0() + SignedDuration::from_hours(1)),
             Poll::Redeemed,
             "redeemed never turns into expired"
         );
@@ -364,16 +364,16 @@ mod tests {
         let mut device = pending();
         device.last_polled_at = Some(t0());
         assert_eq!(
-            judge_poll(&device, t0() + Duration::seconds(4)),
+            judge_poll(&device, t0() + SignedDuration::from_secs(4)),
             Poll::SlowDown { interval: 10 }
         );
         assert_eq!(
-            judge_poll(&device, t0() + Duration::seconds(5)),
+            judge_poll(&device, t0() + SignedDuration::from_secs(5)),
             Poll::Pending
         );
         device.status = DeviceStatus::Approved;
         assert_eq!(
-            judge_poll(&device, t0() + Duration::seconds(1)),
+            judge_poll(&device, t0() + SignedDuration::from_secs(1)),
             Poll::Redeem,
             "a final answer is not held back"
         );

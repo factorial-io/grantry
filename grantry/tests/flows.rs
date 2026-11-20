@@ -11,7 +11,6 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Duration;
 use grantry::client::{ClientError, DocumentPolicy, FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::server::{
@@ -19,6 +18,7 @@ use grantry::server::{
 };
 use grantry::store::{BackendError, Events, Grant, OAuthStore};
 use grantry::{Config, Recheck, ScopeSpec, Server, Signer, Subjects};
+use jiff::SignedDuration;
 use jsonwebtoken::Algorithm;
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
@@ -126,9 +126,9 @@ fn config() -> Config {
         signer: Signer::hmac_base64(Algorithm::HS512, "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0")
             .unwrap(),
         access_token_secs: 900,
-        code_ttl: Duration::seconds(60),
-        pending_ttl: Duration::seconds(600),
-        grant_lifetime: Duration::days(90),
+        code_ttl: SignedDuration::from_secs(60),
+        pending_ttl: SignedDuration::from_secs(600),
+        grant_lifetime: SignedDuration::from_hours(24 * 90),
         documents: DocumentPolicy {
             timeout: StdDuration::from_secs(1),
             ..DocumentPolicy::default()
@@ -427,7 +427,7 @@ async fn deny_and_expiry() {
     assert!(f.server.deny(pending.id, &"alice").await.unwrap().is_none());
 
     let pending = f.server.authorize(&q).await.unwrap();
-    f.store.age(Duration::seconds(601));
+    f.store.age(SignedDuration::from_secs(601));
     assert!(
         f.server
             .pending(pending.id, &"alice")
@@ -527,7 +527,7 @@ async fn code_reuse_revokes_the_grant() {
 async fn expired_code_is_refused() {
     let f = fixture();
     let (client_id, code) = code_for(&f, "alice", "read").await;
-    f.store.age(Duration::seconds(61));
+    f.store.age(SignedDuration::from_secs(61));
     assert!(invalid_grant(
         f.server
             .exchange_code(&exchange_form(&code), Some(&client_id), None)
@@ -597,13 +597,13 @@ async fn a_host_token_format_shapes_refresh_tokens() {
 #[tokio::test]
 async fn an_idle_refresh_token_expires_without_revoking_the_grant() {
     let mut f = fixture();
-    f.server = f.server.with_refresh_idle(Duration::hours(1));
+    f.server = f.server.with_refresh_idle(SignedDuration::from_hours(1));
     let (client_id, tokens) = connect(&f, "alice").await;
     let fresh = tokens.refresh_token.clone().unwrap();
     let (_, refreshed) = f.server.refresh(&fresh, &client_id, None).await.unwrap();
 
     // The same grant, with an idle lifetime its newest token has outlived.
-    let idle = f.server.clone().with_refresh_idle(Duration::zero());
+    let idle = f.server.clone().with_refresh_idle(SignedDuration::ZERO);
     let next = refreshed.refresh_token.clone().unwrap();
     assert!(invalid_grant(idle.refresh(&next, &client_id, None).await));
     // Expiry is not theft: the grant lives, and the token still refreshes
@@ -689,7 +689,7 @@ async fn refresh_rechecks_the_subject() {
 async fn grant_lifetime_is_absolute() {
     let f = fixture();
     let (client_id, tokens) = connect(&f, "alice").await;
-    f.store.age(Duration::days(91));
+    f.store.age(SignedDuration::from_hours(24 * 91));
     let refresh = tokens.refresh_token.as_deref().unwrap();
     assert!(invalid_grant(
         f.server.refresh(refresh, &client_id, None).await
@@ -770,7 +770,7 @@ async fn sweep_removes_ended_grants_after_retention() {
     // carol's grant expires (90 days) without being revoked.
     let (carol_client, carol) = connect(&f, "carol").await;
     let expired = grant_of(&f, &carol).await;
-    f.store.age(Duration::days(62));
+    f.store.age(SignedDuration::from_hours(24 * 62));
     let (client_id, tokens) = connect(&f, "alice").await;
     let first = tokens.refresh_token.unwrap();
     let (_, rotated) = f.server.refresh(&first, &client_id, None).await.unwrap();
@@ -781,8 +781,9 @@ async fn sweep_removes_ended_grants_after_retention() {
 
     // Within the retention both ended grants stay, the rotated token too:
     // only the three used codes go.
-    f.store
-        .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS - 1));
+    f.store.age(SignedDuration::from_hours(
+        24 * (grantry::store::GRANT_RETENTION_DAYS - 1),
+    ));
     assert_eq!(f.store.sweep().await.unwrap(), 3);
     assert!(f.store.find_grant(revoked.id).await.unwrap().is_some());
     assert!(f.store.find_grant(expired.id).await.unwrap().is_some());
@@ -796,8 +797,9 @@ async fn sweep_removes_ended_grants_after_retention() {
 
     // Past it for both: each grant with its refresh tokens (two for alice,
     // one for carol), five rows. Their clients had a grant, so they stay.
-    f.store
-        .age(Duration::days(grantry::store::GRANT_RETENTION_DAYS + 1));
+    f.store.age(SignedDuration::from_hours(
+        24 * (grantry::store::GRANT_RETENTION_DAYS + 1),
+    ));
     assert_eq!(f.store.sweep().await.unwrap(), 5);
     assert!(f.store.find_grant(revoked.id).await.unwrap().is_none());
     assert!(f.store.find_grant(expired.id).await.unwrap().is_none());
@@ -838,7 +840,7 @@ async fn registration_and_sweep() {
 
     // A client that never got a grant is swept after a week.
     let (_, _) = connect(&f, "alice").await;
-    f.store.age(Duration::days(8));
+    f.store.age(SignedDuration::from_hours(24 * 8));
     f.store.sweep().await.unwrap();
     assert!(
         f.store
@@ -854,7 +856,7 @@ async fn sweep_keeps_a_client_with_an_authorization_in_flight() {
     let f = fixture();
     let client_id = register(&f).await;
     let device_client = register(&f).await;
-    f.store.age(Duration::days(8));
+    f.store.age(SignedDuration::from_hours(24 * 8));
     f.server
         .authorize(&authorize_query(&client_id, CALLBACK, "read"))
         .await
@@ -996,7 +998,7 @@ async fn a_denied_device_login_stays_denied() {
 async fn an_undecided_device_login_expires_after_ten_minutes() {
     let f = fixture();
     let (device_code, user_code) = start(&f).await;
-    f.store.age(Duration::seconds(600));
+    f.store.age(SignedDuration::from_secs(600));
     let expired = poll(&f, &device_code).await.unwrap_err();
     assert_eq!(expired.code(), Some("expired_token"));
     assert!(
@@ -1021,7 +1023,7 @@ async fn an_undecided_device_login_expires_after_ten_minutes() {
         .await
         .unwrap()
         .unwrap();
-    f.store.age(Duration::seconds(600));
+    f.store.age(SignedDuration::from_secs(600));
     assert!(matches!(
         poll(&f, &device_code).await,
         Err(PollError::Expired)

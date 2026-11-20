@@ -15,7 +15,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Duration;
 use grantry::client::{FetchError, Fetched, MetadataFetcher};
 use grantry::memory::MemoryStore;
 use grantry::metadata::AuthorizationServerMetadata;
@@ -23,6 +22,7 @@ use grantry::routes::{Routes, endpoints, router};
 use grantry::store::{BackendError, Grant, NoEvents};
 use grantry::{Config, Recheck, ScopeSpec, Server, Signer, Subjects};
 use http_body_util::BodyExt;
+use jiff::SignedDuration;
 use jsonwebtoken::Algorithm;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -59,7 +59,7 @@ fn server() -> Server<String> {
     Server::new(
         Config {
             access_token_secs: 300,
-            grant_lifetime: Duration::days(30),
+            grant_lifetime: SignedDuration::from_hours(24 * 30),
             ..Config::new(
                 format!("{ISSUER}/mcp"),
                 "mcp",
