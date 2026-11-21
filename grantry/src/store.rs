@@ -19,6 +19,17 @@ use crate::device::Device;
 /// flows pass it up untouched.
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
+/// `now + ttl`, or a [`BackendError`] when that is past the latest
+/// [`Timestamp`] (or before the earliest).
+///
+/// The durations a store adds come from [`crate::Config`], which does not
+/// bound them, so `now + ttl` can overflow and panic. Stores compute every
+/// `expires_at` with this instead.
+pub fn expires_at(now: Timestamp, ttl: SignedDuration) -> Result<Timestamp, BackendError> {
+    now.checked_add(ttl)
+        .map_err(|e| format!("expiry {ttl:?} after {now} is out of range: {e}").into())
+}
+
 /// A dynamically registered public client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredClient {
