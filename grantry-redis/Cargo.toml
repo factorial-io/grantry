@@ -1,6 +1,6 @@
 [package]
 name = "grantry-redis"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MPL-2.0"
@@ -11,7 +11,7 @@ keywords = ["oauth", "oauth2", "redis", "mcp", "authorization"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
-grantry = { version = "0.6.0", path = "../grantry" }
+grantry = { version = "0.6.1", path = "../grantry" }
 async-trait = "0.1"
 jiff = { version = "1", default-features = false, features = ["std"] }
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
@@ -20,5 +20,5 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-grantry = { version = "0.6.0", path = "../grantry", features = ["conformance"] }
+grantry = { version = "0.6.1", path = "../grantry", features = ["conformance"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

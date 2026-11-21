@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.1](https://github.com/factorial-io/grantry/compare/grantry-redis-v0.2.0...grantry-redis-v0.2.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* return an error instead of panicking on out-of-range expiries ([0a28f24](https://github.com/factorial-io/grantry/commit/0a28f24ae24005f2cda3c2d9b3ec9b3c0b17a75a)), closes [#48](https://github.com/factorial-io/grantry/issues/48)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * grantry bumped from 0.6.0 to 0.6.1
+  * dev-dependencies
+    * grantry bumped from 0.6.0 to 0.6.1
+
 ## [0.2.0](https://github.com/factorial-io/grantry/compare/grantry-redis-v0.1.0...grantry-redis-v0.2.0) (2026-11-20)
 
 
