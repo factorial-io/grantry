@@ -16,6 +16,10 @@
 //! catches a check-then-write split across round trips, not a race inside a
 //! single backend call.
 //!
+//! A TTL or lifetime whose expiry is past the latest [`Timestamp`] must make
+//! the call fail with a [`crate::BackendError`], not panic: use
+//! [`crate::store::expires_at`] rather than `now + ttl`.
+//!
 //! ```ignore
 //! #[tokio::test]
 //! async fn conforms() {
@@ -415,6 +419,31 @@ where
         "refresh tokens of a revoked grant stay, for the reuse check"
     );
 
+    // An expiry out of range is an error, not a panic.
+    assert!(
+        store
+            .insert_pending(pending(&client_id, SignedDuration::MAX))
+            .await
+            .is_err(),
+        "insert_pending with an out-of-range ttl fails"
+    );
+    let approved = store
+        .insert_pending(pending(&client_id, SignedDuration::from_mins(10)))
+        .await
+        .expect("insert_pending");
+    for (lifetime, code_ttl) in [
+        (SignedDuration::MAX, SignedDuration::from_mins(1)),
+        (SignedDuration::from_hours(24), SignedDuration::MAX),
+    ] {
+        assert!(
+            store
+                .create_grant_with_code(&approved, &alice, lifetime, unique("code"), code_ttl)
+                .await
+                .is_err(),
+            "create_grant_with_code with an out-of-range lifetime or code ttl fails"
+        );
+    }
+
     store.sweep().await.expect("sweep");
 }
 
@@ -429,6 +458,13 @@ where
     let client_id = new.client_id.clone();
     let grant = store.create_grant(new).await.expect("create_grant");
     assert_eq!(grant.subject, subject);
+    assert!(
+        store
+            .create_grant(new_grant(subject.clone(), SignedDuration::MAX))
+            .await
+            .is_err(),
+        "create_grant with an out-of-range lifetime fails"
+    );
     assert_eq!(
         (
             grant.client_id.as_str(),
@@ -644,5 +680,44 @@ where
             .expect("insert_device")
             .is_some(),
         "an expired authorization's user code is free again"
+    );
+
+    // An expiry out of range is an error, not a panic, and a failed
+    // redemption leaves the device approved.
+    assert!(
+        store
+            .insert_device(device(&user_code(), SignedDuration::MAX))
+            .await
+            .is_err(),
+        "insert_device with an out-of-range ttl fails"
+    );
+    let d = store
+        .insert_device(device(&user_code(), SignedDuration::from_mins(10)))
+        .await
+        .expect("insert_device")
+        .expect("inserted");
+    assert!(
+        store
+            .decide_device(d.id, &subject, true)
+            .await
+            .expect("decide")
+    );
+    assert!(
+        store
+            .redeem_device(d.id, new_grant(subject.clone(), SignedDuration::MAX))
+            .await
+            .is_err(),
+        "redeem_device with an out-of-range lifetime fails"
+    );
+    assert!(
+        store
+            .redeem_device(
+                d.id,
+                new_grant(subject.clone(), SignedDuration::from_hours(24))
+            )
+            .await
+            .expect("redeem")
+            .is_some(),
+        "a failed redemption does not use up the device"
     );
 }

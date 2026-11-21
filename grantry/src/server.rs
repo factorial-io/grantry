@@ -25,14 +25,19 @@ use crate::redirect::with_params;
 use crate::request::{self, Registration, RegistrationError};
 use crate::scope::ScopeSpec;
 use crate::store::{
-    BackendError, Events, Grant, NewDevice, NewGrant, NewPending, OAuthStore, Pending, Recheck,
-    RegisteredClient, Subjects, reason,
+    self, BackendError, Events, Grant, NewDevice, NewGrant, NewPending, OAuthStore, Pending,
+    Recheck, RegisteredClient, Subjects, reason,
 };
 use crate::token::{
     self, AccessClaims, Base64Url, Opaque, Signer, TokenFormat, VerifyError, hash_token,
 };
 
 /// What the flows need to know.
+///
+/// The durations are not validated. Keep them to what a login needs (minutes
+/// to a few years): a flow whose expiry would land past the latest
+/// [`jiff::Timestamp`] (year 9999) fails with a [`BackendError`] instead of
+/// issuing anything.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The protected resource (RFC 8707): what an authorization request must
@@ -435,8 +440,10 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> Server<S> {
         let (document, ttl) =
             client::fetch_document(self.fetcher.as_ref(), url, &self.config.documents).await?;
         if !ttl.is_zero() {
-            let expires =
-                Timestamp::now() + SignedDuration::try_from(ttl).unwrap_or(SignedDuration::ZERO);
+            let expires = SignedDuration::try_from(ttl)
+                .map_err(BackendError::from)
+                .and_then(|ttl| store::expires_at(Timestamp::now(), ttl))
+                .map_err(ClientError::Backend)?;
             self.store
                 .store_document(url.as_str(), document.clone(), expires)
                 .await

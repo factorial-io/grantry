@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use grantry::device::{Device, DeviceStatus};
 use grantry::store::{
     BackendError, Code, GRANT_RETENTION_DAYS, Grant, NewDevice, NewGrant, NewPending, OAuthStore,
-    Pending, RefreshToken, RegisteredClient, UNUSED_CLIENT_DAYS,
+    Pending, RefreshToken, RegisteredClient, UNUSED_CLIENT_DAYS, expires_at,
 };
 use jiff::{SignedDuration, Timestamp};
 use redis::aio::ConnectionManager;
@@ -424,11 +424,13 @@ fn grant_fields<S: Serialize>(g: &Grant<S>) -> Result<Vec<(&'static str, String)
 
 /// When a grant's keys go if it is never revoked.
 fn grant_keep_ms<S>(g: &Grant<S>) -> i64 {
-    ms(g.expires_at + retention())
+    ms(g.expires_at
+        .saturating_add(retention())
+        .unwrap_or(Timestamp::MAX))
 }
 
-fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
-    Grant {
+fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Result<Grant<S>, BackendError> {
+    Ok(Grant {
         id: Uuid::new_v4(),
         subject: new.subject,
         client_id: new.client_id,
@@ -436,11 +438,11 @@ fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
         redirect_uri: String::new(),
         scope: new.scope,
         created_at: now,
-        expires_at: now + new.lifetime,
+        expires_at: expires_at(now, new.lifetime)?,
         last_refreshed_at: None,
         revoked_at: None,
         revoke_reason: None,
-    }
+    })
 }
 
 fn code_from(row: &Row) -> Result<Code, BackendError> {
@@ -570,7 +572,7 @@ where
             resource: new.resource,
             subject: None,
             created_at: now,
-            expires_at: now + new.ttl,
+            expires_at: expires_at(now, new.ttl)?,
         };
         let key = self.key("pending", pending.id);
         let mut fields = vec![
@@ -635,13 +637,14 @@ where
             redirect_uri: approved.redirect_uri.clone(),
             scope: approved.scope.clone(),
             created_at: now,
-            expires_at: now + lifetime,
+            expires_at: expires_at(now, lifetime)?,
             last_refreshed_at: None,
             revoked_at: None,
             revoke_reason: None,
         };
         let code_id = Uuid::new_v4();
-        let code_expires = ms(now + code_ttl);
+        let code_expires_at = expires_at(now, code_ttl)?;
+        let code_expires = ms(code_expires_at);
         let code_fields = [
             ("id", code_id.to_string()),
             ("grant_id", grant.id.to_string()),
@@ -649,7 +652,7 @@ where
             ("redirect_uri", approved.redirect_uri.clone()),
             ("resource", approved.resource.clone()),
             ("code_challenge", approved.code_challenge.clone()),
-            ("expires_at", us(now + code_ttl)),
+            ("expires_at", us(code_expires_at)),
         ];
         let (grant_key, code_key, code_id_key) = (
             self.key("grant", grant.id),
@@ -705,7 +708,7 @@ where
     }
 
     async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
-        let grant = new_grant(new, Timestamp::now());
+        let grant = new_grant(new, Timestamp::now())?;
         let key = self.key("grant", grant.id);
         redis::pipe()
             .atomic()
@@ -733,7 +736,7 @@ where
             last_polled_at: None,
             subject: None,
             created_at: now,
-            expires_at: now + new.ttl,
+            expires_at: expires_at(now, new.ttl)?,
         };
         let fields = vec![
             ("id", device.id.to_string()),
@@ -746,7 +749,10 @@ where
             ("created_at", us(now)),
             ("expires_at", us(device.expires_at)),
         ];
-        let keep = device.expires_at + SignedDuration::from_hours(EXPIRED_DEVICE_KEEP_HOURS);
+        let keep = device
+            .expires_at
+            .saturating_add(SignedDuration::from_hours(EXPIRED_DEVICE_KEEP_HOURS))
+            .unwrap_or(Timestamp::MAX);
         let inserted: i64 = self
             .scripts
             .insert_device
@@ -832,7 +838,7 @@ where
         grant: NewGrant<S>,
     ) -> Result<Option<Grant<S>>, BackendError> {
         let now = Timestamp::now();
-        let grant = new_grant(grant, now);
+        let grant = new_grant(grant, now)?;
         let done: i64 = self
             .scripts
             .redeem

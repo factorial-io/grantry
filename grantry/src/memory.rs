@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::device::{Device, DeviceStatus};
 use crate::store::{
     BackendError, Code, GRANT_RETENTION_DAYS, Grant, NewDevice, NewGrant, NewPending, OAuthStore,
-    Pending, RefreshToken, RegisteredClient,
+    Pending, RefreshToken, RegisteredClient, expires_at,
 };
 
 pub use crate::store::UNUSED_CLIENT_DAYS;
@@ -47,8 +47,8 @@ impl<S> Inner<S> {
     }
 }
 
-fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
-    Grant {
+fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Result<Grant<S>, BackendError> {
+    Ok(Grant {
         id: Uuid::new_v4(),
         subject: new.subject,
         client_id: new.client_id,
@@ -56,11 +56,11 @@ fn new_grant<S>(new: NewGrant<S>, now: Timestamp) -> Grant<S> {
         redirect_uri: String::new(),
         scope: new.scope,
         created_at: now,
-        expires_at: now + new.lifetime,
+        expires_at: expires_at(now, new.lifetime)?,
         last_refreshed_at: None,
         revoked_at: None,
         revoke_reason: None,
-    }
+    })
 }
 
 /// See the module docs.
@@ -188,7 +188,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             resource: new.resource,
             subject: None,
             created_at: now,
-            expires_at: now + new.ttl,
+            expires_at: expires_at(now, new.ttl)?,
         };
         self.lock().pending.insert(pending.id, pending.clone());
         Ok(pending)
@@ -246,7 +246,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             redirect_uri: approved.redirect_uri.clone(),
             scope: approved.scope.clone(),
             created_at: now,
-            expires_at: now + lifetime,
+            expires_at: expires_at(now, lifetime)?,
             last_refreshed_at: None,
             revoked_at: None,
             revoke_reason: None,
@@ -258,7 +258,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             redirect_uri: approved.redirect_uri.clone(),
             resource: approved.resource.clone(),
             code_challenge: approved.code_challenge.clone(),
-            expires_at: now + code_ttl,
+            expires_at: expires_at(now, code_ttl)?,
             used_at: None,
         };
         let mut inner = self.lock();
@@ -268,7 +268,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
     }
 
     async fn create_grant(&self, new: NewGrant<S>) -> Result<Grant<S>, BackendError> {
-        let grant = new_grant(new, Timestamp::now());
+        let grant = new_grant(new, Timestamp::now())?;
         self.lock().grants.insert(grant.id, grant.clone());
         Ok(grant)
     }
@@ -294,7 +294,7 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
             last_polled_at: None,
             subject: None,
             created_at: now,
-            expires_at: now + new.ttl,
+            expires_at: expires_at(now, new.ttl)?,
         };
         inner.devices.insert(new.device_code_hash, device.clone());
         Ok(Some(device))
@@ -367,8 +367,8 @@ impl<S: Clone + PartialEq + Send + Sync + 'static> OAuthStore for MemoryStore<S>
         else {
             return Ok(None);
         };
+        let grant = new_grant(grant, now)?;
         d.status = DeviceStatus::Redeemed;
-        let grant = new_grant(grant, now);
         inner.grants.insert(grant.id, grant.clone());
         Ok(Some(grant))
     }
